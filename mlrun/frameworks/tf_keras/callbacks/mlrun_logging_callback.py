@@ -99,6 +99,11 @@ class MLRunLoggingCallback(LoggingCallback):
         # Store the model handler:
         self._model_handler = model_handler
 
+        # Setup the additional TFKerasModelHandler parameters for logging the model later:
+        # TODO: Store an input sample from given training set during the interface wrapping.
+        self._input_sample = None  # type: TFKerasModelHandler.IOSample
+        self._output_sample = None  # type: TFKerasModelHandler.IOSample
+
     def on_train_end(self, logs: dict = None):
         """
         Called at the end of training, logging the model and the summaries of this run.

@@ -416,6 +416,9 @@ class TFKerasModelHandler(DLModelHandler):
             )
 
         # Read the inputs:
+        if self._model.inputs is None:
+            # Some models won't have inputs or input specs.
+            return
         input_signature = [input_layer.type_spec for input_layer in self._model.inputs]
 
         # Set the inputs:
@@ -434,6 +437,9 @@ class TFKerasModelHandler(DLModelHandler):
             )
 
         # Read the outputs:
+        if self._model.outputs is None:
+            # Some models won't have outputs or output specs.
+            return
         output_signature = [
             output_layer.type_spec for output_layer in self._model.outputs
         ]
