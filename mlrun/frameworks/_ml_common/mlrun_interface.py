@@ -3,12 +3,17 @@ from typing import List
 
 import mlrun
 
-from .._common import MLRunInterface, ModelType, RestorationInformation
+from .._common import (
+    DatasetType,
+    MLRunInterface,
+    ModelHandler,
+    ModelType,
+    RestorationInformation,
+    concatenate_x_y,
+)
 from .logger import Logger, LoggerMode
 from .metrics_library import Metric
-from .model_handler import MLModelHandler
 from .plan import MLPlan, MLPlanStages
-from .utils import DatasetType, concatenate_x_y
 
 
 class MLMLRunInterface(MLRunInterface, ABC):
@@ -132,7 +137,7 @@ class MLMLRunInterface(MLRunInterface, ABC):
 
         return y_pred
 
-    def set_model_handler(self, model_handler: MLModelHandler):
+    def set_model_handler(self, model_handler: ModelHandler):
         """
         Set this model's MLRun handler for logging the model as a model artifact post training (post calling 'fit') or
         update the existing model artifact post testing (calling 'predict' / 'predict_proba'). If the logger's context

@@ -7,12 +7,11 @@ import lightgbm as lgb
 
 import mlrun
 
-from .._common import without_mlrun_interface
-from .._ml_common import DatasetType, MLModelHandler
+from .._common import DatasetType, ModelHandler, without_mlrun_interface
 from .mlrun_interface import LGBMModelMLRunInterface
 
 
-class LGBMModelHandler(MLModelHandler):
+class LGBMModelHandler(ModelHandler):
     """
     Class for handling a XGBoost model, enabling loading and saving it during runs.
     """

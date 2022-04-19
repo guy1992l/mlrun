@@ -7,6 +7,7 @@ from torch.utils.data import DataLoader
 
 import mlrun
 
+from .._common import DatasetType, ExtraDataType
 from .callbacks import Callback, MetricFunctionType, MetricValueType
 from .callbacks_handler import CallbacksHandler
 from .mlrun_interface import PyTorchMLRunInterface
@@ -31,9 +32,17 @@ def train(
     use_horovod: bool = None,
     auto_log: bool = True,
     model_name: str = None,
+    tag: str = "",
     modules_map: Union[Dict[str, Union[None, str, List[str]]], str] = None,
     custom_objects_map: Union[Dict[str, Union[str, List[str]]], str] = None,
     custom_objects_directory: str = None,
+    sample_set: Union[DatasetType, mlrun.DataItem, str] = None,
+    y_columns: Union[List[str], List[int]] = None,
+    feature_vector: str = None,
+    feature_weights: List[float] = None,
+    labels: Dict[str, Union[str, int, float]] = None,
+    parameters: Dict[str, Union[str, int, float]] = None,
+    extra_data: Dict[str, ExtraDataType] = None,
     tensorboard_directory: str = None,
     mlrun_callback_kwargs: Dict[str, Any] = None,
     tensorboard_callback_kwargs: Dict[str, Any] = None,
@@ -71,6 +80,7 @@ def train(
                                         to True. IF True, the custom objects are not optional.
     :param model_name:                  The model name to use for storing the model artifact. If not given, the model's
                                         class name will be used.
+    :param tag:                         The model's tag to log with.
     :param modules_map:                 A dictionary of all the modules required for loading the model. Each key is a
                                         path to a module and its value is the object name to import from it. All the
                                         modules will be imported globally. If multiple objects needed to be imported
@@ -111,6 +121,19 @@ def train(
                                         Can be passed as a zip file as well (will be extracted during the run before
                                         loading the model). If the model path given is of a store object, the custom
                                         objects files will be read from the logged custom object artifact of the model.
+    :param sample_set:                  A sample set of inputs for the model for logging its stats along the model in
+                                        favour of model monitoring. Notice: only tabular data is currently supported.
+                                        The sample set provided will be converted into a DataFrame and each column will
+                                        have its own stats. Meaning images, audio, video and text are not supported yet.
+    :param y_columns:                   List of names of all the columns in the ground truth labels in case its a
+                                        pd.DataFrame or a list of integers in case the dataset is a np.ndarray. Must be
+                                        provided for model monitoring.
+    :param feature_vector:              Feature store feature vector uri
+                                        (store://feature-vectors/<project>/<name>[:tag])
+    :param feature_weights:             List of feature weights, one per input column.
+    :param labels:                      Labels to log with the model.
+    :param parameters:                  Parameters to log with the model.
+    :param extra_data:                  Extra data to log with the model.
     :param tensorboard_directory:       If context is not given, or if wished to set the directory even with context,
                                         this will be the output for the event logs of tensorboard. If not given, the
                                         'tensorboard_dir' parameter will be tried to be taken from the provided context.
@@ -146,6 +169,28 @@ def train(
         custom_objects_directory=custom_objects_directory,
         context=context,
     )
+
+    # Load the model if it was not provided:
+    if model is None:
+        handler.load()
+        model = handler.model
+
+    # Set the handler's logging attributes:
+    handler.set_tag(tag=tag)
+    if sample_set is not None:
+        handler.set_sample_set(sample_set=sample_set)
+    if y_columns is not None:
+        handler.set_y_columns(y_columns=y_columns)
+    if feature_vector is not None:
+        handler.set_feature_vector(feature_vector=feature_vector)
+    if feature_weights is not None:
+        handler.set_feature_weights(feature_weights=feature_weights)
+    if labels is not None:
+        handler.set_labels(to_add=labels)
+    if parameters is not None:
+        handler.set_parameters(to_add=parameters)
+    if extra_data is not None:
+        handler.set_extra_data(to_add=extra_data)
 
     # Initialize the interface:
     interface = PyTorchMLRunInterface(model=model, context=context)

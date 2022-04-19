@@ -6,9 +6,9 @@ from sklearn.preprocessing import LabelBinarizer
 
 import mlrun.errors
 
-from .._common.utils import ModelType
+from .._common import DatasetType, ModelType
 from .metric import Metric
-from .utils import AlgorithmFunctionality, DatasetType, MetricEntry
+from .utils import AlgorithmFunctionality, MetricEntry
 
 
 class MetricsLibrary(ABC):

@@ -7,9 +7,8 @@ from sklearn.metrics import roc_auc_score, roc_curve
 
 from mlrun.artifacts import Artifact, PlotlyArtifact
 
-from ..._common import ModelType
+from ..._common import DatasetType, ModelType, to_dataframe
 from ..plan import MLPlanStages, MLPlotPlan
-from ..utils import DatasetType, to_dataframe
 
 
 class ROCCurvePlan(MLPlotPlan):

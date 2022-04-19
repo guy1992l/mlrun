@@ -5,12 +5,11 @@ import cloudpickle
 
 import mlrun
 
-from .._common import without_mlrun_interface
-from .._ml_common import DatasetType, MLModelHandler
+from .._common import DatasetType, ModelHandler, without_mlrun_interface
 from .mlrun_interface import SKLearnMLRunInterface
 
 
-class SKLearnModelHandler(MLModelHandler):
+class SKLearnModelHandler(ModelHandler):
     """
     Class for handling a SciKitLearn model, enabling loading and saving it during runs.
     """

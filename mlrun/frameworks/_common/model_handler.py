@@ -9,15 +9,25 @@ from types import MethodType
 from typing import Any, Dict, Generic, List, Type, Union
 
 import numpy as np
+import pandas as pd
+import scipy.sparse.base
 
 import mlrun
 from mlrun.artifacts import Artifact, ModelArtifact
 from mlrun.data_types import ValueType
+from mlrun.datastore import is_store_uri
 from mlrun.execution import MLClientCtx
 from mlrun.features import Feature
 
 from .mlrun_interface import MLRunInterface
-from .utils import ExtraDataType, IOSampleType, ModelType, PathType
+from .utils import (
+    DatasetType,
+    ExtraDataType,
+    IOSampleType,
+    ModelType,
+    PathType,
+    to_dataframe,
+)
 
 
 class ModelHandler(ABC, Generic[ModelType, IOSampleType]):
@@ -146,6 +156,11 @@ class ModelHandler(ABC, Generic[ModelType, IOSampleType]):
         self._outputs = None  # type: List[Feature]
         self._labels = {}  # type: Dict[str, Union[str, int, float]]
         self._parameters = {}  # type: Dict[str, Union[str, int, float]]
+        self._algorithm = None  # type: str
+        self._sample_set = None  # type: pd.DataFrame
+        self._y_columns = None  # type: Union[List[str], List[int]]
+        self._feature_vector = None  # type: str
+        self._feature_weights = None  # type: List[float]
         self._registered_artifacts = {}  # type: Dict[str, Artifact]
 
         # Set a flag to know if the user logged the model so its artifact is cached:
@@ -236,6 +251,51 @@ class ModelHandler(ABC, Generic[ModelType, IOSampleType]):
         :return: The model's artifact parameters.
         """
         return self._parameters
+
+    @property
+    def algorithm(self) -> str:
+        """
+        Get the model algorithm set in this handler.
+
+        :return: The handler's model algorithm.
+        """
+        return self._algorithm
+
+    @property
+    def sample_set(self) -> pd.DataFrame:
+        """
+        Get the sample dataset set in this handler.
+
+        :return: The handler's sample dataset.
+        """
+        return self._sample_set
+
+    @property
+    def y_columns(self) -> Union[List[str], List[int]]:
+        """
+        Get the sample dataset y columns set in this handler.
+
+        :return: The handler's sample dataset y columns.
+        """
+        return self._y_columns
+
+    @property
+    def feature_vector(self) -> str:
+        """
+        Get the feature vector set in this handler.
+
+        :return: The handler's feature vector.
+        """
+        return self._feature_vector
+
+    @property
+    def feature_weights(self) -> List[float]:
+        """
+        Get the feature weights set in this handler.
+
+        :return: The handler's feature weights.
+        """
+        return self._feature_weights
 
     def get_artifacts(self, committed_only: bool = False) -> Dict[str, ExtraDataType]:
         """
@@ -370,6 +430,84 @@ class ModelHandler(ABC, Generic[ModelType, IOSampleType]):
             for label in to_remove:
                 self._parameters.pop(label)
 
+    def set_algorithm(self, algorithm: str):
+        """
+        Set the algorithm this model will be logged with.
+
+        :param algorithm: The algorithm to set.
+        """
+        self._algorithm = algorithm
+
+    def set_sample_set(self, sample_set: Union[DatasetType, mlrun.DataItem, str]):
+        """
+        Set the sample set this model will be logged with. The sample set will be casted to a pd.DataFrame. Can be sent
+        as a DataItem and as a store object string.
+
+        :param sample_set: The sample set to set.
+
+        :raise MLRunInvalidArgumentError: In case the sample set store uri is incorrect or if the sample set type is not
+                                          supported or if the dimensions of the sample set was different than 2.
+        """
+        # Parse the store uri to a DataItem:
+        if isinstance(sample_set, str):
+            if not is_store_uri(sample_set):
+                raise mlrun.errors.MLRunInvalidArgumentError(
+                    f"The provided sample set string is an invalid store uri: {sample_set}"
+                )
+            sample_set = mlrun.get_dataitem(sample_set)
+
+        # Parse the DataItem to a DataFrame:
+        if isinstance(sample_set, mlrun.DataItem):
+            sample_set = sample_set.as_df()
+
+        # Verify its a 2 dimension data:
+        dimensions = None  # type: int
+        if isinstance(sample_set, (pd.DataFrame, pd.Series, np.ndarray)):
+            dimensions = sample_set.ndim
+        elif isinstance(sample_set, list):
+            dimensions = np.array(sample_set).ndim
+        elif isinstance(sample_set, dict):
+            dimensions = pd.DataFrame(sample_set).ndim
+        elif isinstance(sample_set, scipy.sparse.base.spmatrix):
+            dimensions = pd.DataFrame.sparse.from_spmatrix(sample_set).ndim
+        if dimensions is None:
+            raise mlrun.errors.MLRunInvalidArgumentError(
+                f"Unsupported sample set. Currently only supporting: 'numpy.ndarray', 'pandas.Series', "
+                f"'scipy.sparse.base.spmatrix' list and dict. The given dataset was of type: '{type(sample_set)}'"
+            )
+        if dimensions != 2:
+            raise mlrun.errors.MLRunInvalidArgumentError(
+                f"The sample set must be of 2 dimensions. Given a sample set of {dimensions} dimensions."
+            )
+
+        # Set the sample set casting it to a DataFrame:
+        self._sample_set = to_dataframe(sample_set)
+
+    def set_y_columns(self, y_columns: Union[List[str], List[int]]):
+        """
+        Set the ground truth column names of the sample set this model will be logged with.
+
+        :param y_columns: The ground truth (y) columns to set.
+        """
+        self._y_columns = y_columns
+
+    def set_feature_vector(self, feature_vector: str):
+        """
+        Set the feature vector this model will be logged with.
+
+        :param feature_vector: The feature store feature vector uri to set
+                               (store://feature-vectors/<project>/<name>[:tag]).
+        """
+        self._feature_vector = feature_vector
+
+    def set_feature_weights(self, feature_weights: List[float]):
+        """
+        Set the feature weights this model will be logged with.
+
+        :param feature_weights: The feature weights to set, one per input column.
+        """
+        self._feature_weights = feature_weights
+
     def set_extra_data(
         self,
         to_add: Dict[str, ExtraDataType] = None,
@@ -480,6 +618,11 @@ class ModelHandler(ABC, Generic[ModelType, IOSampleType]):
         outputs: List[Feature] = None,
         metrics: Dict[str, Union[int, float]] = None,
         artifacts: Dict[str, Artifact] = None,
+        algorithm: str = None,
+        sample_set: DatasetType = None,
+        y_columns: Union[List[str], List[int]] = None,
+        feature_vector: str = None,
+        feature_weights: List[float] = None,
         extra_data: Dict[str, ExtraDataType] = None,
         **kwargs,
     ):
@@ -487,16 +630,23 @@ class ModelHandler(ABC, Generic[ModelType, IOSampleType]):
         Log the model held by this handler into the MLRun context provided. The stored values such as labels, parameters
         and artifacts will be used and updated where tag, inputs and outputs will be overridden if given here.
 
-        :param tag:        Tag of a version to give to the logged model. Will override the stored tag in this handler.
-        :param labels:     Labels to log the model with. Will be joined to the labels set.
-        :param parameters: Parameters to log with the model. Will be joined to the parameters set.
-        :param inputs:     A list of features this model expects to receive - the model's input ports. If already set,
-                           will be overridden by the inputs given here.
-        :param outputs:    A list of features this model expects to return - the model's output ports. If already set,
-                           will be overridden by the outputs given here.
-        :param metrics:    Metrics results to log with the model.
-        :param artifacts:  Artifacts to log the model with. Will be joined to the registered artifacts and added to the
-                           extra data.
+        :param tag:             Tag of a version to give to the logged model. Will override the stored tag in this
+                                handler.
+        :param labels:          Labels to log the model with. Will be joined to the labels set.
+        :param parameters:      Parameters to log with the model. Will be joined to the parameters set.
+        :param inputs:          A list of features this model expects to receive - the model's input ports. If already
+                                set, will be overridden by the inputs given here.
+        :param outputs:         A list of features this model expects to return - the model's output ports. If already
+                                set, will be overridden by the outputs given here.
+        :param metrics:         Metrics results to log with the model.
+        :param artifacts:       Artifacts to log the model with. Will be joined to the registered artifacts and added to
+                                the extra data.
+        :param algorithm:       The algorithm of this model. If None it will be read as the model's class name.
+        :param sample_set:      Sample set to use for getting the model's inputs, outputs and base stats for model
+                                monitoring. Do not pass both sample set and inputs / outputs.
+        :param y_columns:       The ground truth (y) labels names.
+        :param feature_vector:  Feature store feature vector uri (store://feature-vectors/<project>/<name>[:tag])
+        :param feature_weights: List of feature weights, one per input column.
         :param extra_data: Extra data to log with the model.
 
         :raise MLRunRuntimeError:         In case is no model in this handler.
@@ -537,6 +687,28 @@ class ModelHandler(ABC, Generic[ModelType, IOSampleType]):
         self.set_labels(to_add=labels)
         self.set_parameters(to_add=parameters)
 
+        # Update the algorithm (set default if both values are None):
+        if algorithm is not None:
+            self._algorithm = algorithm
+        elif self._algorithm is None:
+            try:
+                algorithm = self._model.__class__.__name__
+            except:
+                algorithm = None
+            self.set_algorithm(algorithm=algorithm)
+
+        # Update the sample set:
+        if sample_set is not None:
+            self.set_sample_set(sample_set=sample_set)
+        if y_columns is not None:
+            self.set_y_columns(y_columns=y_columns)
+
+        # Update the feature parameters:
+        if feature_vector is not None:
+            self.set_feature_vector(feature_vector=feature_vector)
+        if feature_weights is not None:
+            self.set_feature_weights(feature_weights=feature_weights)
+
         # Update the extra data:
         self._extra_data = {
             **self._extra_data,
@@ -555,8 +727,8 @@ class ModelHandler(ABC, Generic[ModelType, IOSampleType]):
             db_key=self._model_name,
             model_file=self._model_file,
             tag=self._tag,
-            inputs=self._inputs,
-            outputs=self._outputs,
+            inputs=self._inputs if self._sample_set is None else None,
+            outputs=self._outputs if self._sample_set is None else None,
             framework=self.FRAMEWORK_NAME,
             labels=self._labels,
             parameters=self._parameters,
@@ -566,11 +738,11 @@ class ModelHandler(ABC, Generic[ModelType, IOSampleType]):
                 for k, v in self._extra_data.items()
                 if not isinstance(v, mlrun.DataItem)
             },
-            algorithm=kwargs.get("algorithm", None),
-            training_set=kwargs.get("sample_set", None),
-            label_column=kwargs.get("y_columns", None),
-            feature_vector=kwargs.get("feature_vector", None),
-            feature_weights=kwargs.get("feature_weights", None),
+            algorithm=self._algorithm,
+            training_set=self._sample_set,
+            label_column=self._y_columns,
+            feature_vector=self._feature_vector,
+            feature_weights=self._feature_weights,
         )
 
         # Mark the model is logged:
@@ -584,23 +756,26 @@ class ModelHandler(ABC, Generic[ModelType, IOSampleType]):
         outputs: List[Feature] = None,
         metrics: Dict[str, Union[int, float]] = None,
         artifacts: Dict[str, Artifact] = None,
+        feature_vector: str = None,
+        feature_weights: List[float] = None,
         extra_data: Dict[str, ExtraDataType] = None,
-        **kwargs,
     ):
         """
         Update the model held by this handler into the MLRun context provided, updating the model's artifact properties
         in the same model path provided.
 
-        :param labels:     Labels to update or add to the model.
-        :param parameters: Parameters to update or add to the model.
-        :param inputs:     A list of features this model expects to receive - the model's input ports. If already set,
-                           will be overridden by the inputs given here.
-        :param outputs:    A list of features this model expects to return - the model's output ports. If already set,
-                           will be overridden by the outputs given here.
-        :param metrics:    Metrics results to log with the model.
-        :param artifacts:  Artifacts to update or add to the model. Will be joined to the registered artifacts and added
-                           to the extra data.
-        :param extra_data: Extra data to update or add to the model.
+        :param labels:          Labels to update or add to the model.
+        :param parameters:      Parameters to update or add to the model.
+        :param inputs:          A list of features this model expects to receive - the model's input ports. If already
+                                set, will be overridden by the inputs given here.
+        :param outputs:         A list of features this model expects to return - the model's output ports. If already
+                                set, will be overridden by the outputs given here.
+        :param metrics:         Metrics results to log with the model.
+        :param artifacts:       Artifacts to update or add to the model. Will be joined to the registered artifacts and
+                                added to the extra data.
+        :param feature_vector:  Feature store feature vector uri (store://feature-vectors/<project>/<name>[:tag])
+        :param feature_weights: List of feature weights, one per input column.
+        :param extra_data:      Extra data to update or add to the model.
 
         :raise MLRunInvalidArgumentError: In case a context is missing or the model path in this handler is missing or
                                           not of a store object.
@@ -626,6 +801,12 @@ class ModelHandler(ABC, Generic[ModelType, IOSampleType]):
         # Update labels and parameters:
         self.set_labels(to_add=labels)
         self.set_parameters(to_add=parameters)
+
+        # Update the feature parameters:
+        if feature_vector is not None:
+            self._feature_vector = feature_vector
+        if feature_weights is not None:
+            self._feature_weights = feature_weights
 
         # Update the extra data:
         self._extra_data = {
@@ -657,8 +838,8 @@ class ModelHandler(ABC, Generic[ModelType, IOSampleType]):
                 for k, v in self._extra_data.items()
                 if not isinstance(v, mlrun.DataItem)
             },
-            feature_vector=kwargs.get("feature_vector", None),
-            feature_weights=kwargs.get("feature_weights", None),
+            feature_vector=self._feature_vector,
+            feature_weights=self._feature_weights,
             store_object=not self._is_logged,  # If the model was not logged, store the updated model in the database.
         )
         if self._is_logged:

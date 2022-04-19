@@ -5,6 +5,7 @@ from tensorflow import keras
 
 import mlrun
 
+from .._common import DatasetType, ExtraDataType
 from .callbacks import MLRunLoggingCallback, TensorboardLoggingCallback
 from .mlrun_interface import TFKerasMLRunInterface
 from .model_handler import TFKerasModelHandler
@@ -22,6 +23,13 @@ def apply_mlrun(
     custom_objects_map: Union[Dict[str, Union[str, List[str]]], str] = None,
     custom_objects_directory: str = None,
     context: mlrun.MLClientCtx = None,
+    sample_set: Union[DatasetType, mlrun.DataItem, str] = None,
+    y_columns: Union[List[str], List[int]] = None,
+    feature_vector: str = None,
+    feature_weights: List[float] = None,
+    labels: Dict[str, Union[str, int, float]] = None,
+    parameters: Dict[str, Union[str, int, float]] = None,
+    extra_data: Dict[str, ExtraDataType] = None,
     auto_log: bool = True,
     tensorboard_directory: str = None,
     mlrun_callback_kwargs: Dict[str, Any] = None,
@@ -86,6 +94,18 @@ def apply_mlrun(
                                         objects files will be read from the logged custom object artifact of the model.
     :param context:                     MLRun context to work with. If no context is given it will be retrieved via
                                         'mlrun.get_or_create_ctx(None)'
+    :param sample_set:                  A sample set of inputs for the model for logging its stats along the model in
+                                        favour of model monitoring. Notice: only tabular data is currently supported.
+                                        The sample set provided will be converted into a DataFrame and each column will
+                                        have its own stats. Meaning images, audio, video and text are not supported yet.
+    :param y_columns:                   List of names of all the columns in the ground truth labels in case its a
+                                        pd.DataFrame or a list of integers in case the dataset is a np.ndarray. Must be
+                                        provided for model monitoring.
+    :param feature_vector:              Feature store feature vector uri (store://feature-vectors/<project>/<name>[:tag])
+    :param feature_weights:             List of feature weights, one per input column.
+    :param labels:                      Labels to log with the model.
+    :param parameters:                  Parameters to log with the model.
+    :param extra_data:                  Extra data to log with the model.
     :param auto_log:                    Whether or not to apply MLRun's auto logging on the model. Defaulted to True.
     :param tensorboard_directory:       If context is not given, or if wished to set the directory even with context,
                                         this will be the output for the event logs of tensorboard. If not given, the
@@ -102,7 +122,7 @@ def apply_mlrun(
     :param use_horovod:                 Whether or not to use horovod - a distributed training framework. Defaulted to
                                         None, meaning it will be read from context if available and if not - False.
 
-    :return: The model with MLRun's interface.
+    :return: A handler with the model in it.
     """
     # Get parameters defaults:
     # # Context:
@@ -135,6 +155,23 @@ def apply_mlrun(
     if model is None:
         handler.load()
         model = handler.model
+
+    # Set the handler's logging attributes:
+    handler.set_tag(tag=tag)
+    if sample_set is not None:
+        handler.set_sample_set(sample_set=sample_set)
+    if y_columns is not None:
+        handler.set_y_columns(y_columns=y_columns)
+    if feature_vector is not None:
+        handler.set_feature_vector(feature_vector=feature_vector)
+    if feature_weights is not None:
+        handler.set_feature_weights(feature_weights=feature_weights)
+    if labels is not None:
+        handler.set_labels(to_add=labels)
+    if parameters is not None:
+        handler.set_parameters(to_add=parameters)
+    if extra_data is not None:
+        handler.set_extra_data(to_add=extra_data)
 
     # Add MLRun's interface to the model:
     TFKerasMLRunInterface.add_interface(obj=model)

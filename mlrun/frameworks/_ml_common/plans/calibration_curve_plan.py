@@ -5,9 +5,8 @@ from sklearn.calibration import calibration_curve
 
 from mlrun.artifacts import Artifact, PlotlyArtifact
 
-from ..._common import ModelType
+from ..._common import DatasetType, ModelType
 from ..plan import MLPlanStages, MLPlotPlan
-from ..utils import DatasetType
 
 
 class CalibrationCurvePlan(MLPlotPlan):

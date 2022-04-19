@@ -6,8 +6,7 @@ from typing import Callable, Union
 
 import mlrun.errors
 
-from .._common.utils import ModelType
-from .utils import DatasetType
+from .._common import DatasetType, ModelType
 
 
 class Metric:

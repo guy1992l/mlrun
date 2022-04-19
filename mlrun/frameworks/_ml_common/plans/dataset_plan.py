@@ -7,8 +7,8 @@ import pandas as pd
 import mlrun.errors
 from mlrun.artifacts import Artifact, DatasetArtifact
 
+from ..._common import concatenate_x_y
 from ..plan import MLPlan, MLPlanStages
-from ..utils import concatenate_x_y
 
 
 class DatasetPlan(MLPlan):

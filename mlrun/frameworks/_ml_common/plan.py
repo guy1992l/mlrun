@@ -6,9 +6,8 @@ from IPython.core.display import HTML, display
 
 import mlrun
 
-from .._common import ModelType
+from .._common import DatasetType, ModelType
 from .._common.artifacts_library import Plan
-from .utils import DatasetType
 
 
 class MLPlanStages(Enum):

@@ -1,7 +1,7 @@
 from abc import ABC
 from typing import List
 
-from .._common import ModelType
+from .._common import DatasetType, ModelType
 from .._common.artifacts_library import ArtifactsLibrary, Plan
 from .plans import (
     CalibrationCurvePlan,
@@ -10,7 +10,7 @@ from .plans import (
     FeatureImportancePlan,
     ROCCurvePlan,
 )
-from .utils import AlgorithmFunctionality, DatasetType
+from .utils import AlgorithmFunctionality
 
 
 class MLArtifactsLibrary(ArtifactsLibrary, ABC):

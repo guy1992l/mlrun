@@ -7,13 +7,11 @@ import xgboost as xgb
 
 import mlrun
 
-from .._common import without_mlrun_interface
-from .._ml_common import MLModelHandler
+from .._common import DatasetType, ModelHandler, without_mlrun_interface
 from .mlrun_interface import XGBModelMLRunInterface
-from .utils import DatasetType
 
 
-class XGBoostModelHandler(MLModelHandler):
+class XGBoostModelHandler(ModelHandler):
     """
     Class for handling a XGBoost model, enabling loading and saving it during runs.
     """

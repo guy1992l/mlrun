@@ -7,10 +7,9 @@ import pandas as pd
 import mlrun
 from mlrun.artifacts import Artifact
 
+from .._common import ModelHandler, to_array
 from .metric import Metric
-from .model_handler import MLModelHandler
 from .plan import MLPlan, MLPlanStages
-from .utils import to_array
 
 
 class LoggerMode(Enum):
@@ -185,7 +184,7 @@ class Logger:
 
     def log_run(
         self,
-        model_handler: MLModelHandler,
+        model_handler: ModelHandler,
     ):
         """
         End the logger's run, logging the collected artifacts and metrics results with the model. The model will be
