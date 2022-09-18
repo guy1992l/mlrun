@@ -13,14 +13,17 @@
 # limitations under the License.
 
 import json
+import os
 from copy import deepcopy
 from typing import List, Union
 
 import nuclio
+from nuclio import KafkaTrigger
 
 import mlrun
 import mlrun.api.schemas
 
+from ..datastore import parse_kafka_url
 from ..model import ObjectList
 from ..secrets import SecretsStore
 from ..serving.server import GraphServer, create_graph_server
@@ -33,7 +36,7 @@ from ..serving.states import (
     new_remote_endpoint,
     params_to_step,
 )
-from ..utils import get_caller_globals, logger
+from ..utils import get_caller_globals, logger, model_monitoring, set_paths
 from .function import NuclioSpec, RemoteRuntime
 from .function_reference import FunctionReference
 
@@ -87,6 +90,7 @@ class ServingSpec(NuclioSpec):
         "default_class",
         "secret_sources",
         "track_models",
+        "tracking_policy",
     ]
 
     def __init__(
@@ -122,6 +126,7 @@ class ServingSpec(NuclioSpec):
         graph_initializer=None,
         error_stream=None,
         track_models=None,
+        tracking_policy=None,
         secret_sources=None,
         default_content_type=None,
         node_name=None,
@@ -135,6 +140,7 @@ class ServingSpec(NuclioSpec):
         image_pull_secret=None,
         tolerations=None,
         preemption_mode=None,
+        security_context=None,
     ):
 
         super().__init__(
@@ -171,6 +177,7 @@ class ServingSpec(NuclioSpec):
             image_pull_secret=image_pull_secret,
             tolerations=tolerations,
             preemption_mode=preemption_mode,
+            security_context=security_context,
         )
 
         self.models = models or {}
@@ -184,6 +191,7 @@ class ServingSpec(NuclioSpec):
         self.graph_initializer = graph_initializer
         self.error_stream = error_stream
         self.track_models = track_models
+        self.tracking_policy = tracking_policy
         self.secret_sources = secret_sources or []
         self.default_content_type = default_content_type
 
@@ -288,16 +296,36 @@ class ServingRuntime(RemoteRuntime):
         batch: int = None,
         sample: int = None,
         stream_args: dict = None,
+        tracking_policy: Union[model_monitoring.TrackingPolicy, dict] = None,
     ):
-        """set tracking stream parameters:
+        """set tracking parameters:
 
-        :param stream_path:  path/url of the tracking stream e.g. v3io:///users/mike/mystream
-                             you can use the "dummy://" path for test/simulation
-        :param batch:        micro batch size (send micro batches of N records at a time)
-        :param sample:       sample size (send only one of N records)
-        :param stream_args:  stream initialization parameters, e.g. shards, retention_in_hours, ..
+        :param stream_path:     Path/url of the tracking stream e.g. v3io:///users/mike/mystream
+                                you can use the "dummy://" path for test/simulation.
+        :param batch:           Micro batch size (send micro batches of N records at a time).
+        :param sample:          Sample size (send only one of N records).
+        :param stream_args:     Stream initialization parameters, e.g. shards, retention_in_hours, ..
+        :param tracking_policy: Tracking policy object or a dictionary that will be converted into a tracking policy
+                                object. By using TrackingPolicy, the user can apply his model monitoring requirements,
+                                such as setting the scheduling policy of the model monitoring batch job or changing
+                                the image of the model monitoring stream.
+
+                                example::
+                                # initialize a new serving function
+                                serving_fn = mlrun.import_function("hub://v2_model_server", new_name="serving")
+                                # apply model monitoring and set monitoring batch job to run every 3 hours
+                                tracking_policy = {'default_batch_intervals':"0 */3 * * *"}
+                                serving_fn.set_tracking(tracking_policy=tracking_policy)
+
         """
+
+        # Applying model monitoring configurations
         self.spec.track_models = True
+        self.spec.tracking_policy = model_monitoring.TrackingPolicy()
+        if tracking_policy:
+            self.spec.tracking_policy = self.spec.tracking_policy.from_dict(
+                tracking_policy
+            )
         if stream_path:
             self.spec.parameters["log_stream"] = stream_path
         if batch:
@@ -432,9 +460,26 @@ class ServingRuntime(RemoteRuntime):
 
                 child_function = self._spec.function_refs[function_name]
                 trigger_args = stream.trigger_args or {}
-                child_function.function_object.add_v3io_stream_trigger(
-                    stream.path, group=group, shards=stream.shards, **trigger_args
-                )
+
+                if (
+                    stream.path.startswith("kafka://")
+                    or "kafka_bootstrap_servers" in stream.options
+                ):
+                    brokers = stream.options.get("kafka_bootstrap_servers")
+                    if brokers:
+                        brokers = brokers.split(",")
+                    topic, brokers = parse_kafka_url(stream.path, brokers)
+                    trigger = KafkaTrigger(
+                        brokers=brokers,
+                        topics=[topic],
+                        consumer_group=f"{function_name}-consumer-group",
+                        **trigger_args,
+                    )
+                    child_function.function_object.add_trigger("kafka", trigger)
+                else:
+                    child_function.function_object.add_v3io_stream_trigger(
+                        stream.path, group=group, shards=stream.shards, **trigger_args
+                    )
 
     def _deploy_function_refs(self, builder_env: dict = None):
         """set metadata and deploy child functions"""
@@ -590,6 +635,7 @@ class ServingRuntime(RemoteRuntime):
             "graph_initializer": self.spec.graph_initializer,
             "error_stream": self.spec.error_stream,
             "track_models": self.spec.track_models,
+            "tracking_policy": self.spec.tracking_policy,
             "default_content_type": self.spec.default_content_type,
         }
 
@@ -601,7 +647,12 @@ class ServingRuntime(RemoteRuntime):
         return env
 
     def to_mock_server(
-        self, namespace=None, current_function="*", track_models=False, **kwargs
+        self,
+        namespace=None,
+        current_function="*",
+        track_models=False,
+        workdir=None,
+        **kwargs,
     ) -> GraphServer:
         """create mock server object for local testing/emulation
 
@@ -609,16 +660,23 @@ class ServingRuntime(RemoteRuntime):
         :param log_level: log level (error | info | debug)
         :param current_function: specify if you want to simulate a child function, * for all functions
         :param track_models: allow model tracking (disabled by default in the mock server)
+        :param workdir:   working directory to locate the source code (if not the current one)
         """
 
         # set the namespaces/modules to look for the steps code in
         namespace = namespace or []
         if not isinstance(namespace, list):
             namespace = [namespace]
-        module = mlrun.run.function_to_module(self, silent=True)
+        module = mlrun.run.function_to_module(self, silent=True, workdir=workdir)
         if module:
             namespace.append(module)
         namespace.append(get_caller_globals())
+
+        if workdir:
+            old_workdir = os.getcwd()
+            workdir = os.path.realpath(workdir)
+            set_paths(workdir)
+            os.chdir(workdir)
 
         server = create_graph_server(
             parameters=self.spec.parameters,
@@ -639,5 +697,27 @@ class ServingRuntime(RemoteRuntime):
             logger=logger,
             is_mock=True,
         )
+
+        if workdir:
+            os.chdir(old_workdir)
+
         server.init_object(namespace)
         return server
+
+    def plot(self, filename=None, format=None, source=None, **kw):
+        """plot/save graph using graphviz
+
+        example::
+
+            serving_fn = mlrun.new_function("serving", image="mlrun/mlrun", kind="serving")
+            serving_fn.add_model('my-classifier',model_path=model_path,
+                                  class_name='mlrun.frameworks.sklearn.SklearnModelServer')
+            serving_fn.plot(rankdir="LR")
+
+        :param filename:  target filepath for the image (None for the notebook)
+        :param format:    The output format used for rendering (``'pdf'``, ``'png'``, etc.)
+        :param source:    source step to add to the graph
+        :param kw:        kwargs passed to graphviz, e.g. rankdir="LR" (see: https://graphviz.org/doc/info/attrs.html)
+        :return: graphviz graph object
+        """
+        return self.spec.graph.plot(filename, format=format, source=source, **kw)

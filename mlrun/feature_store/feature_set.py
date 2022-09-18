@@ -25,7 +25,7 @@ from ..config import config as mlconf
 from ..datastore import get_store_uri
 from ..datastore.targets import (
     TargetTypes,
-    default_target_names,
+    get_default_targets,
     get_offline_target,
     get_online_target,
     get_target_driver,
@@ -83,6 +83,24 @@ class FeatureSetSpec(ModelObj):
         engine=None,
         output_path=None,
     ):
+        """Feature set spec object, defines the feature-set's configuration.
+
+        .. warning::
+            This class should not be modified directly. It is managed by the parent feature-set object or using
+            feature-store APIs. Modifying the spec manually may result in unpredictable behaviour.
+
+        :param description:   text description (copied from parent feature-set)
+        :param entities:      list of entity (index key) names or :py:class:`~mlrun.features.FeatureSet.Entity`
+        :param features: list of features - :py:class:`~mlrun.features.FeatureSet.Feature`
+        :param partition_keys: list of fields to partition results by (other than the default timestamp key)
+        :param timestamp_key: timestamp column name
+        :param label_column: name of the label column (the one holding the target (y) values)
+        :param targets: list of data targets
+        :param graph: the processing graph
+        :param function: MLRun runtime to execute the feature-set in
+        :param engine: name of the processing engine (storey, pandas, or spark), defaults to storey
+        :param output_path: default location where to store results (defaults to MLRun's artifact path)
+        """
         self._features: ObjectList = None
         self._entities: ObjectList = None
         self._targets: ObjectList = None
@@ -198,6 +216,20 @@ class FeatureSetStatus(ModelObj):
         function_uri=None,
         run_uri=None,
     ):
+        """Feature set status object, containing the current feature-set's status.
+
+        .. warning::
+            This class should not be modified directly. It is managed by the parent feature-set object or using
+            feature-store APIs. Modifying the status manually may result in unpredictable behaviour.
+
+        :param state: object's current state
+        :param targets: list of the data targets used in the last ingestion operation
+        :param stats: feature statistics calculated in the last ingestion (if stats calculation was requested)
+        :param preview: preview of the feature-set contents (if preview generation was requested)
+        :param function_uri: function used to execute the feature-set graph
+        :param run_uri: last run used for ingestion
+        """
+
         self.state = state or "created"
         self._targets: ObjectList = None
         self.targets = targets or []
@@ -253,6 +285,7 @@ class FeatureSet(ModelObj):
         entities: List[Union[Entity, str]] = None,
         timestamp_key: str = None,
         engine: str = None,
+        label_column: str = None,
     ):
         """Feature set object, defines a set of features and their data pipeline
 
@@ -267,6 +300,7 @@ class FeatureSet(ModelObj):
         :param entities:      list of entity (index key) names or :py:class:`~mlrun.features.FeatureSet.Entity`
         :param timestamp_key: timestamp column name
         :param engine:        name of the processing engine (storey, pandas, or spark), defaults to storey
+        :param label_column:  name of the label column (the one holding the target (y) values)
         """
         self._spec: FeatureSetSpec = None
         self._metadata = None
@@ -279,6 +313,7 @@ class FeatureSet(ModelObj):
             entities=entities,
             timestamp_key=timestamp_key,
             engine=engine,
+            label_column=label_column,
         )
 
         if timestamp_key in self.spec.entities.keys():
@@ -387,7 +422,7 @@ class FeatureSet(ModelObj):
             )
         targets = targets or []
         if with_defaults:
-            targets.extend(default_target_names())
+            targets.extend(get_default_targets())
 
         validate_target_list(targets=targets)
 
@@ -398,7 +433,9 @@ class FeatureSet(ModelObj):
                     f"target kind is not supported, use one of: {','.join(TargetTypes.all())}"
                 )
             if not hasattr(target, "kind"):
-                target = DataTargetBase(target, name=str(target))
+                target = DataTargetBase(
+                    target, name=str(target), partitioned=(target == "parquet")
+                )
             self.spec.targets.update(target)
         if default_final_step:
             self.spec.graph.final_step = default_final_step
@@ -593,13 +630,13 @@ class FeatureSet(ModelObj):
 
             myset.add_aggregation("ask", ["sum", "max"], "1h", "10m", name="asks")
 
-        :param column:     name of column/field aggregate. Do not name columns starting with either `t_` or `aggr_`.
+        :param column:     name of column/field aggregate. Do not name columns starting with either `_` or `aggr_`.
                            They are reserved for internal use, and the data does not ingest correctly.
                            When using the pandas engine, do not use spaces (` `) or periods (`.`) in the column names;
                            they cause errors in the ingestion.
         :param operations: aggregation operations, e.g. ['sum', 'std']
         :param windows:    time windows, can be a single window, e.g. '1h', '1d',
-                            or a list of same unit windows e.g ['1h', '6h']
+                            or a list of same unit windows e.g. ['1h', '6h']
                             windows are transformed to fixed windows or
                             sliding windows depending whether period parameter
                             provided.
@@ -617,7 +654,7 @@ class FeatureSet(ModelObj):
                               to a specific window. It is processed only once
                               (when the query processes the window to which the record belongs).
         :param period:     optional, sliding window granularity, e.g. '20s' '10m'  '3h' '7d'
-        :param name:       optional, aggregation name/prefix. Must be unique per feature set.If not passed,
+        :param name:       optional, aggregation name/prefix. Must be unique per feature set. If not passed,
                             the column will be used as name.
         :param step_name: optional, graph step name
         :param state_name: *Deprecated* - use step_name instead
@@ -772,12 +809,12 @@ class FeatureSet(ModelObj):
             if self.spec.timestamp_key and self.spec.timestamp_key not in entities:
                 columns = [self.spec.timestamp_key] + columns
             columns = entities + columns
-        driver = get_offline_target(self, name=target_name)
-        if not driver:
+        target = get_offline_target(self, name=target_name)
+        if not target:
             raise mlrun.errors.MLRunNotFoundError(
                 "there are no offline targets for this feature set"
             )
-        return driver.as_df(
+        result = target.as_df(
             columns=columns,
             df_module=df_module,
             entities=entities,
@@ -786,6 +823,23 @@ class FeatureSet(ModelObj):
             time_column=time_column,
             **kwargs,
         )
+        if not columns:
+            drop_cols = []
+            if target.time_partitioning_granularity:
+                for col in mlrun.utils.helpers.LEGAL_TIME_UNITS:
+                    drop_cols.append(col)
+                    if col == target.time_partitioning_granularity:
+                        break
+            elif (
+                target.partitioned
+                and not target.partition_cols
+                and not target.key_bucketing_number
+            ):
+                drop_cols = mlrun.utils.helpers.DEFAULT_TIME_PARTITIONS
+            if drop_cols:
+                # if these columns aren't present for some reason, that's no reason to fail
+                result.drop(columns=drop_cols, inplace=True, errors="ignore")
+        return result
 
     def save(self, tag="", versioned=False):
         """save to mlrun db"""

@@ -95,6 +95,11 @@ class MpiRuntimeV1Alpha1(AbstractMPIJobRuntime):
             "spec.template.spec.tolerations",
             mlrun.runtimes.pod.get_sanitized_attribute(self.spec, "tolerations"),
         )
+        update_in(
+            job,
+            "spec.template.spec.securityContext",
+            mlrun.runtimes.pod.get_sanitized_attribute(self.spec, "security_context"),
+        )
         if self.spec.priority_class_name and len(
             mlconf.get_valid_function_priority_class_names()
         ):
@@ -151,6 +156,8 @@ class MpiRuntimeV1Alpha1(AbstractMPIJobRuntime):
 
 
 class MpiV1Alpha1RuntimeHandler(BaseRuntimeHandler):
+    kind = "mpijob"
+
     def _resolve_crd_object_status_info(
         self, db: DBInterface, db_session: Session, crd_object
     ) -> typing.Tuple[bool, typing.Optional[datetime], typing.Optional[str]]:

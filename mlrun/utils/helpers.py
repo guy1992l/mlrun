@@ -27,6 +27,7 @@ from types import ModuleType
 from typing import Any, List, Optional, Tuple
 
 import numpy as np
+import pandas
 import requests
 import yaml
 from dateutil import parser
@@ -46,6 +47,10 @@ _missing = object()
 
 hub_prefix = "hub://"
 DB_SCHEMA = "store"
+
+LEGAL_TIME_UNITS = ["year", "month", "day", "hour", "minute", "second"]
+DEFAULT_TIME_PARTITIONS = ["year", "month", "day", "hour"]
+DEFAULT_TIME_PARTITIONING_GRANULARITY = "hour"
 
 
 class StorePrefix:
@@ -431,7 +436,7 @@ yaml.add_representer(Timestamp, date_representer, Dumper=yaml.SafeDumper)
 yaml.add_multi_representer(enum.Enum, enum_representer, Dumper=yaml.SafeDumper)
 
 
-def dict_to_yaml(struct):
+def dict_to_yaml(struct) -> str:
     try:
         data = yaml.safe_dump(struct, default_flow_style=False, sort_keys=False)
     except RepresenterError as exc:
@@ -456,23 +461,6 @@ class MyEncoder(json.JSONEncoder):
 
 def dict_to_json(struct):
     return json.dumps(struct, cls=MyEncoder)
-
-
-def uxjoin(base, local_path, key="", iter=None, is_dir=False):
-    if is_dir and (not local_path or local_path in [".", "./"]):
-        local_path = ""
-    elif not local_path:
-        local_path = key
-
-    if iter:
-        local_path = path.join(str(iter), local_path).replace("\\", "/")
-
-    if base and not base.endswith("/"):
-        base += "/"
-    base_str = base or ""
-    if local_path.startswith("./"):
-        local_path = local_path[len("./") :]
-    return f"{base_str}{local_path}"
 
 
 def parse_versioned_object_uri(uri, default_project=""):
@@ -1264,6 +1252,11 @@ def calculate_local_file_hash(filename):
     return h.hexdigest()
 
 
+def calculate_dataframe_hash(dataframe: pandas.DataFrame):
+    # https://stackoverflow.com/questions/49883236/how-to-generate-a-hash-or-checksum-value-on-python-dataframe-created-from-a-fix/62754084#62754084
+    return hashlib.sha1(pandas.util.hash_pandas_object(dataframe).values).hexdigest()
+
+
 def fill_artifact_path_template(artifact_path, project):
     # Supporting {{project}} is new, in certain setup configuration the default artifact path has the old
     # {{run.project}} so we're supporting it too for backwards compatibility
@@ -1323,3 +1316,20 @@ def is_legacy_artifact(artifact):
         return "metadata" not in artifact
     else:
         return not hasattr(artifact, "metadata")
+
+
+def set_paths(pythonpath=""):
+    """update the sys path"""
+    if not pythonpath:
+        return
+    paths = pythonpath.split(":")
+    for p in paths:
+        abspath = path.abspath(p)
+        if abspath not in sys.path:
+            sys.path.append(abspath)
+
+
+def is_relative_path(path):
+    if not path:
+        return False
+    return not (path.startswith("/") or ":\\" in path or "://" in path)

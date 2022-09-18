@@ -61,6 +61,7 @@ class MPIV1ResourceSpec(MPIResourceSpec):
         pythonpath=None,
         tolerations=None,
         preemption_mode=None,
+        security_context=None,
     ):
         super().__init__(
             command=command,
@@ -89,6 +90,7 @@ class MPIV1ResourceSpec(MPIResourceSpec):
             pythonpath=pythonpath,
             tolerations=tolerations,
             preemption_mode=preemption_mode,
+            security_context=security_context,
         )
         self.clean_pod_policy = clean_pod_policy or MPIJobV1CleanPodPolicies.default()
 
@@ -213,6 +215,14 @@ class MpiRuntimeV1(AbstractMPIJobRuntime):
                     "spec.imagePullSecrets",
                     [{"name": self.spec.image_pull_secret}],
                 )
+            if self.spec.security_context:
+                update_in(
+                    pod_template,
+                    "spec.securityContext",
+                    mlrun.runtimes.pod.get_sanitized_attribute(
+                        self.spec, "security_context"
+                    ),
+                )
             update_in(pod_template, "metadata.labels", pod_labels)
             update_in(pod_template, "spec.volumes", self.spec.volumes)
             update_in(pod_template, "spec.nodeName", self.spec.node_name)
@@ -234,6 +244,10 @@ class MpiRuntimeV1(AbstractMPIJobRuntime):
                     pod_template,
                     "spec.priorityClassName",
                     self.spec.priority_class_name,
+                )
+            if self.spec.service_account:
+                update_in(
+                    pod_template, "spec.serviceAccountName", self.spec.service_account
                 )
 
         # configuration for workers only
@@ -302,6 +316,8 @@ class MpiRuntimeV1(AbstractMPIJobRuntime):
 
 
 class MpiV1RuntimeHandler(BaseRuntimeHandler):
+    kind = "mpijob"
+
     def _resolve_crd_object_status_info(
         self, db: DBInterface, db_session: Session, crd_object
     ) -> typing.Tuple[bool, typing.Optional[datetime], typing.Optional[str]]:

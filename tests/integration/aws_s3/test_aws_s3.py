@@ -1,3 +1,17 @@
+# Copyright 2018 Iguazio
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
 import os
 import random
 from pathlib import Path
@@ -22,9 +36,10 @@ with open(test_filename, "r") as f:
 credential_params = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]
 
 
-def aws_s3_configured():
+def aws_s3_configured(extra_params=None):
+    extra_params = extra_params or []
     env_params = config["env"]
-    needed_params = ["bucket_name", *credential_params]
+    needed_params = ["bucket_name", *credential_params, *extra_params]
     for param in needed_params:
         if not env_params.get(param):
             return False
@@ -103,3 +118,37 @@ class TestAwsS3:
 
         secrets = {param: config["env"][param] for param in credential_params}
         self._perform_aws_s3_tests(secrets=secrets)
+
+    @pytest.mark.skipif(
+        not aws_s3_configured(extra_params=["AWS_ROLE_ARN"]),
+        reason="Role ARN not configured",
+    )
+    def test_using_role_arn(self):
+        params = credential_params.copy()
+        params.append("AWS_ROLE_ARN")
+        for param in params:
+            os.environ[param] = config["env"][param]
+            os.environ.pop(SecretsStore.k8s_env_variable_name_for_secret(param), None)
+
+        self._perform_aws_s3_tests()
+
+        # cleanup
+        for param in params:
+            os.environ.pop(param)
+
+    @pytest.mark.skipif(
+        not aws_s3_configured(extra_params=["AWS_PROFILE"]),
+        reason="AWS profile not configured",
+    )
+    def test_using_profile(self):
+        params = credential_params.copy()
+        params.append("AWS_PROFILE")
+        for param in params:
+            os.environ[param] = config["env"][param]
+            os.environ.pop(SecretsStore.k8s_env_variable_name_for_secret(param), None)
+
+        self._perform_aws_s3_tests()
+
+        # cleanup
+        for param in params:
+            os.environ.pop(param)

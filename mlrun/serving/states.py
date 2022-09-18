@@ -17,16 +17,16 @@ __all__ = ["TaskStep", "RouterStep", "RootFlowStep"]
 import os
 import pathlib
 import traceback
-import warnings
 from copy import copy, deepcopy
 from inspect import getfullargspec, signature
 from typing import Union
 
 from ..config import config
 from ..datastore import get_stream_pusher
+from ..datastore.utils import parse_kafka_url
 from ..errors import MLRunInvalidArgumentError
 from ..model import ModelObj, ObjectDict
-from ..platforms.iguazio import parse_v3io_path
+from ..platforms.iguazio import parse_path
 from ..utils import get_class, get_function
 from .utils import _extract_input_data, _update_result_body
 
@@ -90,7 +90,7 @@ class BaseStep(ModelObj):
         self._parent = None
         self.comment = None
         self.context = None
-        self.after = after
+        self.after = after or []
         self._next = None
         self.shape = shape
         self.on_error = None
@@ -121,29 +121,20 @@ class BaseStep(ModelObj):
             self._next.append(key)
         return self
 
-    def after_step(self, after):
-        """specify the previous step name"""
-        # most steps only accept one source
-        self.after = [after] if after else []
+    def after_step(self, *after, append=True):
+        """specify the previous step names"""
+        # add new steps to the after list
+        if not append:
+            self.after = []
+        for name in after:
+            # if its a step/task class (vs a str) extract its name
+            name = name if isinstance(name, str) else name.name
+            if name not in self.after:
+                self.after.append(name)
         return self
 
-    def after_state(self, after):
-        warnings.warn(
-            "This method is deprecated. Use after_step instead",
-            # TODO: In 0.7.0 do changes in examples & demos In 0.9.0 remove
-            PendingDeprecationWarning,
-        )
-        return self.after_step(after)
-
-    def error_handler(self, step_name: str = None, state_name=None):
+    def error_handler(self, step_name: str = None):
         """set error handler step (on failure/raise of this step)"""
-        if state_name:
-            warnings.warn(
-                "The state_name parameter is deprecated. Use step_name instead",
-                # TODO: In 0.7.0 do changes in examples & demos In 0.9.0 remove
-                PendingDeprecationWarning,
-            )
-            step_name = step_name or state_name
         if not step_name:
             raise MLRunInvalidArgumentError("Must specify step_name")
         self.on_error = step_name
@@ -210,14 +201,6 @@ class BaseStep(ModelObj):
                 )
             next_level = next_level[step]
         return next_level
-
-    def path_to_state(self, path: str):
-        warnings.warn(
-            "This method is deprecated. Use path_to_step instead",
-            # TODO: In 0.7.0 do changes in examples & demos In 0.9.0 remove
-            PendingDeprecationWarning,
-        )
-        return self.path_to_step(path)
 
     def to(
         self,
@@ -374,7 +357,8 @@ class TaskStep(BaseStep):
             for key in ["name", "context", "input_path", "result_path", "full_event"]:
                 if argspec.varkw or key in argspec.args:
                     class_args[key] = getattr(self, key)
-
+            if argspec.varkw or "graph_step" in argspec.args:
+                class_args["graph_step"] = self
             try:
                 self._object = self._class_object(**class_args)
             except TypeError as exc:
@@ -537,7 +521,7 @@ class RouterStep(TaskStep):
         :param function:   function this step should run in
         """
 
-        if not route and not class_name:
+        if not route and not class_name and not handler:
             raise MLRunInvalidArgumentError("route or class_name must be specified")
         if not route:
             route = TaskStep(class_name, class_args, handler=handler)
@@ -586,7 +570,14 @@ class RouterStep(TaskStep):
         yield from self._routes.keys()
 
     def plot(self, filename=None, format=None, source=None, **kw):
-        """plot/save a graphviz plot"""
+        """plot/save graph using graphviz
+
+        :param filename:  target filepath for the image (None for the notebook)
+        :param format:    The output format used for rendering (``'pdf'``, ``'png'``, etc.)
+        :param source:    source step to add to the graph
+        :param kw:        kwargs passed to graphviz, e.g. rankdir="LR" (see: https://graphviz.org/doc/info/attrs.html)
+        :return: graphviz graph object
+        """
         return _generate_graphviz(
             self, _add_graphviz_router, filename, format, source=source, **kw
         )
@@ -631,29 +622,13 @@ class QueueStep(BaseStep):
                 self.path,
                 shards=self.shards,
                 retention_in_hours=self.retention_in_hours,
+                **self.options,
             )
         self._set_error_handler()
 
     @property
     def async_object(self):
         return self._async_object
-
-    def after_step(self, after):
-        # queue steps accept multiple sources
-        if self.after:
-            if after:
-                self.after.append(after)
-        else:
-            self.after = [after] if after else []
-        return self
-
-    def after_state(self, after):
-        warnings.warn(
-            "This method is deprecated. Use after_step instead",
-            # TODO: In 0.7.0 do changes in examples & demos In 0.9.0 remove
-            PendingDeprecationWarning,
-        )
-        return self.after_step(after)
 
     def run(self, event, *args, **kwargs):
         data = event.body
@@ -677,18 +652,6 @@ class FlowStep(BaseStep):
         "default_final_step",
     ]
 
-    # TODO - remove once "states" is fully deprecated
-    @classmethod
-    def from_dict(cls, struct=None, fields=None, deprecated_fields: dict = None):
-        deprecated_fields = deprecated_fields or {}
-        deprecated_fields.update(
-            {"states": "steps", "default_final_state": "default_final_step"}
-        )
-
-        return super().from_dict(
-            struct, fields=fields, deprecated_fields=deprecated_fields
-        )
-
     def __init__(
         self,
         name=None,
@@ -696,33 +659,12 @@ class FlowStep(BaseStep):
         after: list = None,
         engine=None,
         final_step=None,
-        # TODO - remove once usage of "state" is fully deprecated
-        states=None,
-        final_state=None,
     ):
         super().__init__(name, after)
-        if states:
-            warnings.warn(
-                "The states parameter is deprecated. Use steps instead",
-                # TODO: In 0.7.0 do changes in examples & demos In 0.9.0 remove
-                PendingDeprecationWarning,
-            )
-            steps = steps or states
-        if final_state:
-            warnings.warn(
-                "The final_state parameter is deprecated. Use final_step instead",
-                # TODO: In 0.7.0 do changes in examples & demos In 0.9.0 remove
-                PendingDeprecationWarning,
-            )
-            final_step = final_step or final_state
-
         self._steps = None
         self.steps = steps
         self.engine = engine
-        # TODO - remove use of START_FROM_STATE once it's fully deprecated.
-        self.from_step = os.environ.get("START_FROM_STEP", None) or os.environ.get(
-            "START_FROM_STATE", None
-        )
+        self.from_step = os.environ.get("START_FROM_STEP", None)
         self.final_step = final_step
 
         self._last_added = None
@@ -740,15 +682,6 @@ class FlowStep(BaseStep):
         return self._steps
 
     @property
-    def states(self):
-        warnings.warn(
-            "This property is deprecated. Use steps instead",
-            # TODO: In 0.7.0 do changes in examples & demos In 0.9.0 remove
-            PendingDeprecationWarning,
-        )
-        return self._steps
-
-    @property
     def controller(self):
         """async (storey) flow controller"""
         return self._controller
@@ -756,15 +689,6 @@ class FlowStep(BaseStep):
     @steps.setter
     def steps(self, steps):
         self._steps = ObjectDict.from_dict(classes_map, steps, "task")
-
-    @states.setter
-    def states(self, states):
-        warnings.warn(
-            "This property is deprecated. Use steps instead",
-            # TODO: In 0.7.0 do changes in examples & demos In 0.9.0 remove
-            PendingDeprecationWarning,
-        )
-        self._steps = ObjectDict.from_dict(classes_map, states, "task")
 
     def add_step(
         self,
@@ -824,16 +748,10 @@ class FlowStep(BaseStep):
             class_args=class_args,
         )
 
-        self.insert_step(name, step, after, before)
+        after_list = after if isinstance(after, list) else [after]
+        for after in after_list:
+            self.insert_step(name, step, after, before)
         return step
-
-    def insert_state(self, key, state, after, before=None):
-        warnings.warn(
-            "This method is deprecated. Use insert_step instead",
-            # TODO: In 0.7.0 do changes in examples & demos In 0.9.0 remove
-            PendingDeprecationWarning,
-        )
-        return self.insert_step(key, state, after, before)
 
     def insert_step(self, key, step, after, before=None):
         """insert step object into the flow, specify before and after"""
@@ -865,19 +783,12 @@ class FlowStep(BaseStep):
                 raise GraphError(
                     f"graph loop, step {before} is specified in before and/or after {key}"
                 )
-            self[before].after_step(step.name)
+            self[before].after_step(step.name, append=False)
         self._last_added = step
         return step
 
-    def clear_children(self, steps: list = None, states: list = None):
+    def clear_children(self, steps: list = None):
         """remove some or all of the states, empty/None for all"""
-        if states:
-            warnings.warn(
-                "This states parameter is deprecated. Use steps instead",
-                # TODO: In 0.7.0 do changes in examples & demos In 0.9.0 remove
-                PendingDeprecationWarning,
-            )
-            steps = steps or states
         if not steps:
             steps = self._steps.keys()
         for key in steps:
@@ -896,6 +807,7 @@ class FlowStep(BaseStep):
         yield from self._steps.keys()
 
     def init_object(self, context, namespace, mode="sync", reset=False, **extra_kwargs):
+        """initialize graph objects and classes"""
         self.context = context
         self.check_and_process_graph()
 
@@ -927,6 +839,7 @@ class FlowStep(BaseStep):
         start_steps = []
         for step in self._steps.values():
             step._next = None
+            step._visited = False
             if step.after:
                 loop_step = has_loop(step, [])
                 if loop_step:
@@ -943,8 +856,8 @@ class FlowStep(BaseStep):
             if step.on_error and step.on_error in start_steps:
                 start_steps.remove(step.on_error)
             if step.after:
-                prev_step = step.after[0]
-                self[prev_step].set_next(step.name)
+                for prev_step in step.after:
+                    self[prev_step].set_next(step.name)
         if self.on_error and self.on_error in start_steps:
             start_steps.remove(self.on_error)
 
@@ -1024,13 +937,16 @@ class FlowStep(BaseStep):
         """initialize and build the async/storey DAG"""
 
         def process_step(state, step, root):
-            if not state._is_local_function(self.context):
+            if not state._is_local_function(self.context) or state._visited:
                 return
             for item in state.next or []:
                 next_state = root[item]
                 if next_state.async_object:
                     next_step = step.to(next_state.async_object)
                     process_step(next_state, next_step, root)
+            state._visited = (
+                True  # mark visited to avoid re-visit in case of multiple uplinks
+            )
 
         default_source, self._wait_for_result = _init_async_objects(
             self.context, self._steps.values()
@@ -1153,7 +1069,15 @@ class FlowStep(BaseStep):
             return self._controller.await_termination()
 
     def plot(self, filename=None, format=None, source=None, targets=None, **kw):
-        """plot/save graph using graphviz"""
+        """plot/save graph using graphviz
+
+        :param filename:  target filepath for the image (None for the notebook)
+        :param format:    The output format used for rendering (``'pdf'``, ``'png'``, etc.)
+        :param source:    source step to add to the graph
+        :param targets:   list of target steps to add to the graph
+        :param kw:        kwargs passed to graphviz, e.g. rankdir="LR" (see: https://graphviz.org/doc/info/attrs.html)
+        :return: graphviz graph object
+        """
         return _generate_graphviz(
             self,
             _add_graphviz_flow,
@@ -1170,13 +1094,6 @@ class RootFlowStep(FlowStep):
 
     kind = "root"
     _dict_fields = ["steps", "engine", "final_step", "on_error"]
-
-    # TODO - remove once "final_state" is fully deprecated
-    @classmethod
-    def from_dict(cls, struct=None, fields=None):
-        return super().from_dict(
-            struct, fields=fields, deprecated_fields={"final_state": "final_step"}
-        )
 
 
 classes_map = {
@@ -1301,25 +1218,6 @@ def get_name(name, class_name):
     return class_name
 
 
-def params_to_state(
-    class_name,
-    name,
-    handler=None,
-    graph_shape=None,
-    function=None,
-    full_event=None,
-    class_args=None,
-):
-    warnings.warn(
-        "This method is deprecated. Use param_to_step instead",
-        # TODO: In 0.7.0 do changes in examples & demos In 0.9.0 remove
-        PendingDeprecationWarning,
-    )
-    return params_to_step(
-        class_name, name, handler, graph_shape, function, full_event, class_args
-    )
-
-
 def params_to_step(
     class_name,
     name,
@@ -1402,14 +1300,33 @@ def _init_async_objects(context, steps):
                 if step.path and not skip_stream:
                     stream_path = step.path
                     endpoint = None
-                    if "://" in stream_path:
-                        endpoint, stream_path = parse_v3io_path(step.path)
-                        stream_path = stream_path.strip("/")
-                    step._async_object = storey.StreamTarget(
-                        storey.V3ioDriver(endpoint),
-                        stream_path,
-                        context=context,
+                    kafka_bootstrap_servers = step.options.get(
+                        "kafka_bootstrap_servers"
                     )
+                    if stream_path.startswith("kafka://") or kafka_bootstrap_servers:
+                        topic, bootstrap_servers = parse_kafka_url(
+                            stream_path, kafka_bootstrap_servers
+                        )
+
+                        kafka_producer_options = step.options.get(
+                            "kafka_producer_options"
+                        )
+
+                        step._async_object = storey.KafkaTarget(
+                            topic=topic,
+                            bootstrap_servers=bootstrap_servers,
+                            producer_options=kafka_producer_options,
+                            context=context,
+                        )
+                    else:
+                        if stream_path.startswith("v3io://"):
+                            endpoint, stream_path = parse_path(step.path)
+                            stream_path = stream_path.strip("/")
+                        step._async_object = storey.StreamTarget(
+                            storey.V3ioDriver(endpoint),
+                            stream_path,
+                            context=context,
+                        )
                 else:
                     step._async_object = storey.Map(lambda x: x)
 

@@ -93,7 +93,7 @@ class TableArtifact(Artifact):
         if not self._is_df:
             return self.spec.get_body()
         csv_buffer = StringIO()
-        self.get_body().to_csv(csv_buffer, line_terminator="\n", encoding="utf-8")
+        self.spec.get_body().to_csv(csv_buffer, line_terminator="\n", encoding="utf-8")
         return csv_buffer.getvalue()
 
 
@@ -102,9 +102,11 @@ class DatasetArtifactSpec(ArtifactSpec):
         "schema",
         "header",
         "length",
-        "preview",
-        "stats",
         "column_metadata",
+        "features",
+        "partition_keys",
+        "timestamp_key",
+        "label_column",
     ]
 
     def __init__(self):
@@ -112,9 +114,11 @@ class DatasetArtifactSpec(ArtifactSpec):
         self.schema = None
         self.header = None
         self.length = None
-        self.preview = None
-        self.stats = None
         self.column_metadata = None
+        self.features = None
+        self.partition_keys = None
+        self.timestamp_key = None
+        self.label_column = None
 
 
 class DatasetArtifact(Artifact):
@@ -133,6 +137,7 @@ class DatasetArtifact(Artifact):
         extra_data: dict = None,
         column_metadata: dict = None,
         ignore_preview_limits: bool = False,
+        label_column: str = None,
         **kwargs,
     ):
 
@@ -146,9 +151,10 @@ class DatasetArtifact(Artifact):
         if format == "pq":
             format = "parquet"
         self.format = format
-        self.stats = None
+        self.status.stats = None
         self.extra_data = extra_data or {}
         self.column_metadata = column_metadata or {}
+        self.spec.label_column = label_column
 
         if df is not None:
             if hasattr(df, "dask"):
@@ -170,7 +176,27 @@ class DatasetArtifact(Artifact):
     def spec(self, spec):
         self._spec = self._verify_dict(spec, "spec", DatasetArtifactSpec)
 
-    def upload(self):
+    def upload(self, artifact_path: str = None):
+        """
+        internal, upload to target store
+        :param artifact_path: required only for when generating target_path from artifact hash
+        """
+        if not self.spec.target_path:
+            if self.spec.src_path:
+                (
+                    self.metadata.hash,
+                    self.spec.target_path,
+                ) = self.resolve_file_target_hash_path(
+                    self.spec.src_path, artifact_path=artifact_path
+                )
+            else:
+                (
+                    self.metadata.hash,
+                    self.spec.target_path,
+                ) = self.resolve_dataframe_target_hash_path(
+                    self._df, artifact_path=artifact_path
+                )
+
         suffix = pathlib.Path(self.spec.target_path).suffix
         format = self.spec.format
         if not format:
@@ -188,6 +214,19 @@ class DatasetArtifact(Artifact):
             src_path=self.spec.src_path,
             **self._kw,
         )
+
+    def resolve_dataframe_target_hash_path(self, dataframe, artifact_path: str):
+        if not artifact_path:
+            raise mlrun.errors.MLRunInvalidArgumentError(
+                "Unable to resolve body target hash path, artifact_path is not defined"
+            )
+        dataframe_hash = mlrun.utils.helpers.calculate_dataframe_hash(dataframe)
+        suffix = self._resolve_suffix()
+        artifact_path = (
+            artifact_path + "/" if not artifact_path.endswith("/") else artifact_path
+        )
+        target_path = f"{artifact_path}{dataframe_hash}{suffix}"
+        return dataframe_hash, target_path
 
     @property
     def df(self) -> pd.DataFrame:
@@ -227,7 +266,7 @@ class DatasetArtifact(Artifact):
         if len(preview_df.columns) > max_preview_columns and not ignore_preview_limits:
             preview_df = preview_df.iloc[:, :max_preview_columns]
         artifact.spec.header = preview_df.columns.values.tolist()
-        artifact.spec.preview = preview_df.values.tolist()
+        artifact.status.preview = preview_df.values.tolist()
         artifact.spec.schema = build_table_schema(preview_df)
         if (
             stats
@@ -236,7 +275,7 @@ class DatasetArtifact(Artifact):
             )
             or ignore_preview_limits
         ):
-            artifact.spec.stats = get_df_stats(df)
+            artifact.status.stats = get_df_stats(df)
 
     @property
     def column_metadata(self):
@@ -315,48 +354,48 @@ class DatasetArtifact(Artifact):
         """This is a property of the spec, look there for documentation
         leaving here for backwards compatibility with users code that used ArtifactLegacy"""
         warnings.warn(
-            "This is a property of the spec, use artifact.spec.preview instead"
+            "This is a property of the status, use artifact.status.preview instead"
             "This will be deprecated in 1.0.0, and will be removed in 1.2.0",
             # TODO: In 1.0.0 do changes in examples & demos In 1.2.0 remove
             PendingDeprecationWarning,
         )
-        return self.spec.preview
+        return self.status.preview
 
     @preview.setter
     def preview(self, preview):
         """This is a property of the spec, look there for documentation
         leaving here for backwards compatibility with users code that used ArtifactLegacy"""
         warnings.warn(
-            "This is a property of the spec, use artifact.spec.preview instead"
+            "This is a property of the status, use artifact.status.preview instead"
             "This will be deprecated in 1.0.0, and will be removed in 1.2.0",
             # TODO: In 1.0.0 do changes in examples & demos In 1.2.0 remove
             PendingDeprecationWarning,
         )
-        self.spec.preview = preview
+        self.status.preview = preview
 
     @property
     def stats(self):
         """This is a property of the spec, look there for documentation
         leaving here for backwards compatibility with users code that used ArtifactLegacy"""
         warnings.warn(
-            "This is a property of the spec, use artifact.spec.stats instead"
+            "This is a property of the status, use artifact.status.stats instead"
             "This will be deprecated in 1.0.0, and will be removed in 1.2.0",
             # TODO: In 1.0.0 do changes in examples & demos In 1.2.0 remove
             PendingDeprecationWarning,
         )
-        return self.spec.stats
+        return self.status.stats
 
     @stats.setter
     def stats(self, stats):
         """This is a property of the spec, look there for documentation
         leaving here for backwards compatibility with users code that used ArtifactLegacy"""
         warnings.warn(
-            "This is a property of the spec, use artifact.spec.stats instead"
+            "This is a property of the status, use artifact.status.stats instead"
             "This will be deprecated in 1.0.0, and will be removed in 1.2.0",
             # TODO: In 1.0.0 do changes in examples & demos In 1.2.0 remove
             PendingDeprecationWarning,
         )
-        self.spec.stats = stats
+        self.status.stats = stats
 
 
 class LegacyTableArtifact(LegacyArtifact):
@@ -607,11 +646,11 @@ def update_dataset_meta(
     if header:
         artifact_spec.spec.header = header
     if stats:
-        artifact_spec.spec.stats = stats
+        artifact_spec.status.stats = stats
     if schema:
         artifact_spec.spec.schema = schema
     if preview:
-        artifact_spec.spec.preview = preview
+        artifact_spec.status.preview = preview
     if column_metadata:
         artifact_spec.spec.column_metadata = column_metadata
     if labels:
@@ -656,4 +695,4 @@ def upload_dataframe(
         size = target_class(path=target_path).write_dataframe(df, **kw)
         return size, None
 
-    raise mlrun.errors.MLRunInvalidArgumentError(f"format {format} not implemented yes")
+    raise mlrun.errors.MLRunInvalidArgumentError(f"format {format} not implemented yet")

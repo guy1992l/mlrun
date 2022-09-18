@@ -1,3 +1,17 @@
+# Copyright 2018 Iguazio
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
 import pandas
 
 import mlrun
@@ -9,6 +23,7 @@ class TestArtifacts(tests.integration.sdk_api.base.TestMLRunIntegration):
     def test_artifacts(self):
         db = mlrun.get_run_db()
         prj, uid, key, body = "p9", "u19", "k802", "tomato"
+        mlrun.get_or_create_project(prj, "./")
         artifact = mlrun.artifacts.Artifact(key, body, target_path="a.txt")
 
         db.store_artifact(key, artifact, uid, project=prj)
@@ -31,6 +46,7 @@ class TestArtifacts(tests.integration.sdk_api.base.TestMLRunIntegration):
 
     def test_list_artifacts_filter_by_kind(self):
         prj, uid, key, body = "p9", "u19", "k802", "tomato"
+        mlrun.get_or_create_project(prj, context="./")
         model_artifact = mlrun.artifacts.model.ModelArtifact(
             key, body, target_path="a.txt"
         )

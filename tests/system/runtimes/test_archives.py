@@ -1,3 +1,17 @@
+# Copyright 2018 Iguazio
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
 import os
 import tempfile
 
@@ -36,6 +50,7 @@ need_private_git = pytest.mark.skipif(
 class TestArchiveSources(tests.system.base.TestMLRunSystem):
 
     project_name = "git-tests"
+    custom_project_names_to_delete = []
 
     def custom_setup(self):
         self.remote_code_dir = f"v3io:///projects/{self.project_name}/code/"
@@ -47,6 +62,10 @@ class TestArchiveSources(tests.system.base.TestMLRunSystem):
                     "GIT_TOKEN": os.environ["MLRUN_SYSTEM_TESTS_PRIVATE_GIT_TOKEN"],
                 }
             )
+
+    def custom_teardown(self):
+        for name in self.custom_project_names_to_delete:
+            self._delete_test_project(name)
 
     def _upload_code_to_cluster(self):
         if not self.uploaded_code:
@@ -195,4 +214,71 @@ class TestArchiveSources(tests.system.base.TestMLRunSystem):
         fn.verbose = True
         mlrun.deploy_function(fn)
         resp = fn.invoke("")
+        assert "tag=" in resp.decode()
+
+    def test_job_project(self):
+        project = mlrun.new_project("git-proj-job1", user_project=True)
+
+        # using project.name because this is a user project meaning the project name get concatenated with the user name
+        self.custom_project_names_to_delete.append(project.name)
+        project.save()
+        project.set_source(f"{git_uri}#main", True)  # , workdir="gtst")
+        project.set_function(
+            name="myjob",
+            handler="rootfn.job_handler",
+            image=base_image,
+            kind="job",
+            with_repo=True,
+        )
+
+        run = project.run_function("myjob")
+        assert run.state() == "completed"
+        assert run.output("tag")
+
+    def test_nuclio_project(self):
+        project = mlrun.new_project("git-proj-nuc", user_project=True)
+        # using project.name because this is a user project meaning the project name get concatenated with the user name
+        self.custom_project_names_to_delete.append(project.name)
+
+        project.save()
+        project.set_source(f"{git_uri}#main")
+        project.set_function(
+            name="mynuclio",
+            handler="rootfn:nuclio_handler",
+            image=base_image,
+            kind="nuclio",
+            with_repo=True,
+        )
+
+        deployment = project.deploy_function("mynuclio")
+        resp = deployment.function.invoke("")
+        assert "tag=" in resp.decode()
+
+    def test_project_subdir(self):
+        # load project into a tmp dir, look for the project.yaml in the subpath
+        project = mlrun.load_project(
+            tempfile.mkdtemp(),
+            f"{git_uri}#main",
+            name="git-proj2",
+            user_project=True,
+            subpath="subdir",
+        )
+        # using project.name because this is a user project meaning the project name get concatenated with the user name
+        self.custom_project_names_to_delete.append(project.name)
+
+        project.save()
+        # run job locally (from cloned source)
+        run = project.run_function("myjob", local=True)
+        assert run.state() == "completed"
+        assert run.output("tag")
+
+        # build and run job on the cluster
+        project.build_function("myjob")
+        run = project.run_function("myjob")
+        assert run.state() == "completed"
+        assert run.output("tag")
+
+        # deploy Nuclio function and invoke
+        deployment = project.deploy_function("mynuclio")
+        resp = deployment.function.invoke("")
         assert "tag=" in resp.decode()

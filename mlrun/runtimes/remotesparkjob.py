@@ -15,6 +15,9 @@ import re
 import typing
 from subprocess import run
 
+import kubernetes.client
+
+import mlrun.errors
 from mlrun.config import config
 
 from ..model import RunObject
@@ -54,6 +57,7 @@ class RemoteSparkSpec(KubeResourceSpec):
         pythonpath=None,
         tolerations=None,
         preemption_mode=None,
+        security_context=None,
     ):
         super().__init__(
             command=command,
@@ -81,6 +85,7 @@ class RemoteSparkSpec(KubeResourceSpec):
             pythonpath=pythonpath,
             tolerations=tolerations,
             preemption_mode=preemption_mode,
+            security_context=security_context,
         )
         self.provider = provider
 
@@ -142,6 +147,18 @@ class RemoteSparkRuntime(KubejobRuntime):
                 )
             )
 
+    def with_security_context(
+        self, security_context: kubernetes.client.V1SecurityContext
+    ):
+        """
+        With security context is not supported for spark runtime.
+        Driver / Executor processes run with uid / gid 1000 as long as security context is not defined.
+        If in the future we want to support setting security context it will work only from spark version 3.2 onwards.
+        """
+        raise mlrun.errors.MLRunInvalidArgumentTypeError(
+            "with_security_context is not supported with remote spark"
+        )
+
     @property
     def _resolve_default_base_image(self):
         if (
@@ -189,6 +206,8 @@ class RemoteSparkRuntime(KubejobRuntime):
 
 
 class RemoteSparkRuntimeHandler(KubeRuntimeHandler):
+    kind = "remote-spark"
+
     @staticmethod
     def _are_resources_coupled_to_run_object() -> bool:
         return True

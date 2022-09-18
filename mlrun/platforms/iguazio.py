@@ -30,7 +30,6 @@ from mlrun.utils import dict_to_json
 
 _cached_control_session = None
 
-
 VolumeMount = namedtuple("Mount", ["path", "sub_path"])
 
 
@@ -424,9 +423,64 @@ class OutputStream:
             )
 
 
+class KafkaOutputStream:
+    def __init__(
+        self,
+        topic,
+        brokers,
+        producer_options=None,
+        mock=False,
+    ):
+        self._kafka_producer = None
+        self._topic = topic
+        self._brokers = brokers
+        self._producer_options = producer_options or {}
+
+        self._mock = mock
+        self._mock_queue = []
+
+        self._initialized = False
+
+    def _lazy_init(self):
+        if self._initialized:
+            return
+
+        import kafka
+
+        self._kafka_producer = kafka.KafkaProducer(
+            bootstrap_servers=self._brokers,
+            **self._producer_options,
+        )
+
+        self._initialized = True
+
+    def push(self, data):
+        self._lazy_init()
+
+        def dump_record(rec):
+            if isinstance(rec, bytes):
+                return rec
+
+            if not isinstance(rec, str):
+                rec = dict_to_json(rec)
+
+            return rec.encode("UTF-8")
+
+        if not isinstance(data, list):
+            data = [data]
+
+        if self._mock:
+            # for mock testing
+            self._mock_queue.extend(data)
+        else:
+            for record in data:
+                serialized_record = dump_record(record)
+                self._kafka_producer.send(self._topic, serialized_record)
+
+
 class V3ioStreamClient:
     def __init__(self, url: str, shard_id: int = 0, seek_to: str = None, **kwargs):
-        endpoint, stream_path = parse_v3io_path(url)
+        endpoint, stream_path = parse_path(url)
         seek_options = ["EARLIEST", "LATEST", "TIME", "SEQUENCE"]
         seek_to = seek_to or "LATEST"
         seek_to = seek_to.upper()
@@ -528,7 +582,6 @@ def is_iguazio_system_2_10_or_above(dashboard_url):
 def add_or_refresh_credentials(
     api_url: str, username: str = "", password: str = "", token: str = ""
 ) -> (str, str, str):
-
     if is_iguazio_session(password):
         return username, password, token
 
@@ -582,20 +635,24 @@ def add_or_refresh_credentials(
     return username, control_session, ""
 
 
-def parse_v3io_path(url, suffix="/"):
-    """return v3io table path from url"""
+def parse_path(url, suffix="/"):
+    """return endpoint and table path from url"""
     parsed_url = urlparse(url)
-    scheme = parsed_url.scheme.lower()
-    if scheme != "v3io" and scheme != "v3ios":
-        raise mlrun.errors.MLRunInvalidArgumentError(
-            "url must start with v3io://[host]/{container}/{path}, got " + url
-        )
-    endpoint = parsed_url.hostname
-    if endpoint:
-        if parsed_url.port:
-            endpoint += f":{parsed_url.port}"
-        prefix = "https" if scheme == "v3ios" else "http"
-        endpoint = f"{prefix}://{endpoint}"
+    if parsed_url.netloc:
+        scheme = parsed_url.scheme.lower()
+        if scheme == "v3ios":
+            prefix = "https"
+        elif scheme == "v3io":
+            prefix = "http"
+        elif scheme == "redis":
+            prefix = "redis"
+        elif scheme == "rediss":
+            prefix = "rediss"
+        else:
+            raise mlrun.errors.MLRunInvalidArgumentError(
+                "url must start with v3io/v3ios/redis/rediss, got " + url
+            )
+        endpoint = f"{prefix}://{parsed_url.netloc}"
     else:
         endpoint = None
     return endpoint, parsed_url.path.strip("/") + suffix

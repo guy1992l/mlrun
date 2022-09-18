@@ -13,7 +13,10 @@
 # limitations under the License.
 import hashlib
 import os
+import tempfile
+import typing
 import warnings
+import zipfile
 
 import yaml
 
@@ -22,9 +25,12 @@ import mlrun.errors
 
 from ..datastore import get_store_uri, is_store_uri, store_manager
 from ..model import ModelObj
-from ..utils import StorePrefix, calculate_local_file_hash, generate_artifact_uri
-
-calc_hash = True
+from ..utils import (
+    StorePrefix,
+    calculate_local_file_hash,
+    generate_artifact_uri,
+    is_relative_path,
+)
 
 
 class ArtifactMetadata(ModelObj):
@@ -133,6 +139,8 @@ class ArtifactSpec(ModelObj):
     @inline.setter
     def inline(self, body):
         self._body = body
+        if body:
+            self._is_inline = True
 
     def get_body(self):
         """get the artifact body when inline"""
@@ -140,10 +148,12 @@ class ArtifactSpec(ModelObj):
 
 
 class ArtifactStatus(ModelObj):
-    _dict_fields = ["state"]
+    _dict_fields = ["state", "stats", "preview"]
 
     def __init__(self):
         self.state = "created"
+        self.stats = None
+        self.preview = None
 
     def base_dict(self):
         return super().to_dict()
@@ -168,6 +178,7 @@ class Artifact(ModelObj):
         project=None,
         metadata: ArtifactMetadata = None,
         spec: ArtifactSpec = None,
+        src_path: str = None,
     ):
         self._metadata = None
         self.metadata = metadata
@@ -182,9 +193,10 @@ class Artifact(ModelObj):
         self.spec.target_path = target_path or self.spec.target_path
         self.spec.format = format or self.spec.format
         self.spec.viewer = viewer or self.spec.viewer
+        self.spec.src_path = src_path
 
         if body:
-            self.spec.inline = body
+            self.spec._body = body
         self.spec._is_inline = is_inline or self.spec._is_inline
 
         self.status = ArtifactStatus()
@@ -212,6 +224,60 @@ class Artifact(ModelObj):
     @status.setter
     def status(self, status):
         self._status = self._verify_dict(status, "status", ArtifactStatus)
+
+    def _get_file_body(self):
+        body = self.spec.get_body()
+        if body:
+            return body
+        if self.src_path and os.path.isfile(self.src_path):
+            with open(self.src_path, "rb") as fp:
+                return fp.read()
+        return mlrun.get_dataitem(self.get_target_path()).get()
+
+    def export(self, target_path: str, with_extras=True):
+        """save the artifact object into a yaml/json file or zip archive
+
+        when the target path is a .yaml/.json file the artifact spec is saved into that file,
+        when the target_path suffix is '.zip' the artifact spec, body and extra data items are
+        packaged into a zip file. The archive target_path support DataItem urls for remote object storage
+        (e.g. s3://<bucket>/<path>).
+
+        :param target_path: path to store artifact .yaml/.json spec or .zip (spec with the content)
+        :param with_extras: will include the extra_data items in the zip archive
+        """
+        if target_path.endswith(".yaml") or target_path.endswith(".yml"):
+            mlrun.get_dataitem(target_path).put(self.to_yaml())
+
+        elif target_path.endswith(".json"):
+            mlrun.get_dataitem(target_path).put(self.to_json())
+
+        elif target_path.endswith(".zip"):
+            tmp_path = None
+            if "://" in target_path:
+                tmp_path = tempfile.NamedTemporaryFile(suffix=".zip", delete=False).name
+            zipf = zipfile.ZipFile(tmp_path or target_path, "w")
+            body = self._get_file_body()
+            zipf.writestr("_body", body)
+            extras = {}
+            if with_extras:
+                for k, item_path in self.extra_data.items():
+                    if is_relative_path(item_path):
+                        base_dir = self.src_path or ""
+                        if not self.is_dir:
+                            base_dir = os.path.dirname(base_dir)
+                        item_path = os.path.join(base_dir, item_path).replace("\\", "/")
+                    zipf.writestr(k, mlrun.get_dataitem(item_path).get())
+                    extras[k] = k
+            artifact = self.copy()
+            artifact.extra_data = extras
+            zipf.writestr("_spec.yaml", artifact.to_yaml())
+            zipf.close()
+
+            if tmp_path:
+                mlrun.get_dataitem(target_path).upload(tmp_path)
+                os.remove(tmp_path)
+        else:
+            raise ValueError("unsupported file suffix, use .yaml, .json, or .zip")
 
     def before_log(self):
         pass
@@ -257,30 +323,124 @@ class Artifact(ModelObj):
                 struct[field] = val.base_dict()
         return struct
 
-    def upload(self):
-        """internal, upload to target store"""
+    def upload(self, artifact_path: str = None):
+        """
+        internal, upload to target store
+        :param artifact_path: required only for when generating target_path from artifact hash
+        """
         src_path = self.spec.src_path
         body = self.get_body()
         if body:
-            self._upload_body(body)
+            self._upload_body(body=body, artifact_path=artifact_path)
         else:
             if src_path and os.path.isfile(src_path):
-                self._upload_file(src_path)
+                self._upload_file(source_path=src_path, artifact_path=artifact_path)
 
-    def _upload_body(self, body, target=None):
-        if calc_hash:
-            self.metadata.hash = blob_hash(body)
+    def _upload_body(self, body, target=None, artifact_path: str = None):
+        body_hash = None
+        if not target and not self.spec.target_path:
+            if not mlrun.mlconf.artifacts.generate_target_path_from_artifact_hash:
+                raise mlrun.errors.MLRunInvalidArgumentError(
+                    "Unable to resolve target path, no target path is defined and "
+                    "mlrun.mlconf.artifacts.generate_target_path_from_artifact_hash is set to false"
+                )
+            body_hash, self.spec.target_path = self.resolve_body_target_hash_path(
+                body, artifact_path
+            )
+
+        if mlrun.mlconf.artifacts.calculate_hash:
+            self.metadata.hash = body_hash or calculate_blob_hash(body)
         self.spec.size = len(body)
+
         store_manager.object(url=target or self.spec.target_path).put(body)
 
-    def _upload_file(self, src, target=None):
-        if calc_hash:
-            self.metadata.hash = calculate_local_file_hash(src)
-        self.spec.size = os.stat(src).st_size
-        store_manager.object(url=target or self.spec.target_path).upload(src)
+    def _upload_file(
+        self, source_path: str, target_path: str = None, artifact_path: str = None
+    ):
+        file_hash = None
+        if not target_path and not self.spec.target_path:
+            if not mlrun.mlconf.artifacts.generate_target_path_from_artifact_hash:
+                raise mlrun.errors.MLRunInvalidArgumentError(
+                    "Unable to resolve target path, no target path is defined and "
+                    "mlrun.mlconf.artifacts.generate_target_path_from_artifact_hash is set to false"
+                )
+            file_hash, self.spec.target_path = self.resolve_file_target_hash_path(
+                source_path, artifact_path
+            )
+        if mlrun.mlconf.artifacts.calculate_hash:
+            self.metadata.hash = file_hash or calculate_local_file_hash(source_path)
+        self.spec.size = os.stat(source_path).st_size
+
+        store_manager.object(url=target_path or self.spec.target_path).upload(
+            source_path
+        )
+
+    def resolve_body_target_hash_path(
+        self, body: typing.Union[bytes, str], artifact_path: str
+    ) -> (str, str):
+        """
+        constructs the target path by calculating the artifact body hash
+        :param body: artifact body to calculate hash on
+        :param artifact_path: the base path for constructing the target path
+        :return: [artifact_hash, target_path]
+        """
+        return self._resolve_target_hash_path(
+            artifact_source=body,
+            artifact_path=artifact_path,
+            hash_method=calculate_blob_hash,
+        )
+
+    def resolve_file_target_hash_path(
+        self, source_path: str, artifact_path: str
+    ) -> (str, str):
+        """
+        constructs the target path by calculating the artifact source hash
+        :param source_path: artifact file source path to calculate hash on
+        :param artifact_path: the base path for constructing the target path
+        :return: [artifact_hash, target_path]
+        """
+        return self._resolve_target_hash_path(
+            artifact_source=source_path,
+            artifact_path=artifact_path,
+            hash_method=calculate_local_file_hash,
+        )
+
+    def _resolve_target_hash_path(
+        self,
+        artifact_source: typing.Union[bytes, str],
+        artifact_path: str,
+        hash_method: typing.Callable,
+    ) -> (str, str):
+        """
+        constructs the target path by calculating the artifact source hash
+        :param artifact_source: artifact to calculate hash on. May be path to source (str) or content (bytes)
+        :param artifact_path: the base path for constructing the target path
+        :param hash_method: the method which calculates the hash from the artifact source
+        :return: [artifact_hash, target_path]
+        """
+        if not artifact_path:
+            raise mlrun.errors.MLRunInvalidArgumentError(
+                "Unable to resolve file target hash path, artifact_path is not defined"
+            )
+        artifact_hash = hash_method(artifact_source)
+        suffix = self._resolve_suffix()
+        artifact_path = (
+            artifact_path + "/" if not artifact_path.endswith("/") else artifact_path
+        )
+        target_path = f"{artifact_path}{artifact_hash}{suffix}"
+        return artifact_hash, target_path
+
+    def _resolve_suffix(self) -> str:
+        suffix = os.path.splitext(self.spec.src_path or "")[1]
+        if not suffix and self.spec.format:
+            suffix = f".{self.spec.format}"
+        return suffix
 
     # Following properties are for backwards compatibility with the ArtifactLegacy class. They should be
     # removed once we only work with the new Artifact structure.
+
+    def is_inline(self):
+        return self.spec._is_inline
 
     @property
     def inline(self):
@@ -690,6 +850,9 @@ class Artifact(ModelObj):
         )
         self.metadata.hash = hash
 
+    def generate_target_path(self, artifact_path, producer):
+        return generate_target_path(self, artifact_path, producer)
+
 
 class DirArtifactSpec(ArtifactSpec):
     _dict_fields = [
@@ -725,17 +888,39 @@ class DirArtifact(Artifact):
     def is_dir(self):
         return True
 
-    def upload(self):
+    def upload(self, artifact_path: str = None):
+        """
+        internal, upload to target store
+        :param artifact_path: required only for when generating target_path from artifact hash
+        """
         if not self.spec.src_path:
-            raise ValueError("local/source path not specified")
+            raise mlrun.errors.MLRunInvalidArgumentError(
+                "local/source path not specified"
+            )
 
         files = os.listdir(self.spec.src_path)
-        for f in files:
-            file_path = os.path.join(self.spec.src_path, f)
+        for file_name in files:
+            file_path = os.path.join(self.spec.src_path, file_name)
             if not os.path.isfile(file_path):
-                raise ValueError(f"file {file_path} not found, cant upload")
-            target = os.path.join(self.spec.target_path, f)
-            store_manager.object(url=target).upload(file_path)
+                raise mlrun.errors.MLRunNotFoundError(
+                    f"file {file_path} not found, cant upload"
+                )
+
+            if self.spec.target_path:
+                target_path = os.path.join(self.spec.target_path, file_name)
+            elif mlrun.mlconf.artifacts.generate_target_path_from_artifact_hash:
+                _, target_path = self.resolve_file_target_hash_path(
+                    source_path=file_path, artifact_path=artifact_path
+                )
+            else:
+                raise mlrun.errors.MLRunInvalidArgumentError(
+                    "target path is not specified and mlrun.mlconf.artifacts.generate_target_path_from_artifact_hash "
+                    "set to False"
+                )
+
+            store_manager.object(url=target_path).upload(file_path)
+            # add files of the directory to the extra data of the artifact with value of the target path
+            self.spec.extra_data[file_name] = target_path
 
 
 class LinkArtifactSpec(ArtifactSpec):
@@ -851,6 +1036,9 @@ class LegacyArtifact(ModelObj):
             if hasattr(item, "target_path"):
                 self.extra_data[key] = item.target_path
 
+    def is_inline(self):
+        return self._inline
+
     @property
     def is_dir(self):
         """this is a directory"""
@@ -866,6 +1054,8 @@ class LegacyArtifact(ModelObj):
     @inline.setter
     def inline(self, body):
         self._body = body
+        if body:
+            self._inline = True
 
     @property
     def uri(self):
@@ -928,19 +1118,22 @@ class LegacyArtifact(ModelObj):
                 self._upload_file(src_path)
 
     def _upload_body(self, body, target=None):
-        if calc_hash:
-            self.hash = blob_hash(body)
+        if mlrun.mlconf.artifacts.calculate_hash:
+            self.hash = calculate_blob_hash(body)
         self.size = len(body)
         store_manager.object(url=target or self.target_path).put(body)
 
     def _upload_file(self, src, target=None):
-        if calc_hash:
+        if mlrun.mlconf.artifacts.calculate_hash:
             self.hash = calculate_local_file_hash(src)
         self.size = os.stat(src).st_size
         store_manager.object(url=target or self.target_path).upload(src)
 
     def artifact_kind(self):
         return self.kind
+
+    def generate_target_path(self, artifact_path, producer):
+        return generate_target_path(self, artifact_path, producer)
 
 
 class LegacyDirArtifact(LegacyArtifact):
@@ -997,7 +1190,7 @@ class LegacyLinkArtifact(LegacyArtifact):
         self.link_tree = link_tree
 
 
-def blob_hash(data):
+def calculate_blob_hash(data):
     if isinstance(data, str):
         data = data.encode()
     h = hashlib.sha1()
@@ -1006,35 +1199,50 @@ def blob_hash(data):
 
 
 def upload_extra_data(
-    artifact_spec: Artifact,
+    artifact: Artifact,
     extra_data: dict,
     prefix="",
     update_spec=False,
+    artifact_path: str = None,
 ):
+    """upload extra data to the artifact store"""
     if not extra_data:
         return
-    target_path = artifact_spec.target_path
+    # TODO: change to use `artifact.spec` when removing legacy artifacts
+    target_path = artifact.target_path
     for key, item in extra_data.items():
 
         if isinstance(item, bytes):
-            target = os.path.join(target_path, key)
+            if target_path:
+                target = os.path.join(target_path, prefix + key)
+            else:
+                _, target = artifact.resolve_body_target_hash_path(
+                    item, artifact_path=artifact_path
+                )
+
             store_manager.object(url=target).put(item)
-            artifact_spec.extra_data[prefix + key] = target
+            artifact.extra_data[prefix + key] = target
             continue
 
-        if not (item.startswith("/") or "://" in item):
+        if is_relative_path(item):
             src_path = (
-                os.path.join(artifact_spec.src_path, item)
-                if artifact_spec.src_path
-                else item
+                os.path.join(artifact.src_path, item) if artifact.src_path else item
             )
             if not os.path.isfile(src_path):
                 raise ValueError(f"extra data file {src_path} not found")
-            target = os.path.join(target_path, item)
+
+            if target_path:
+                target = os.path.join(target_path, item)
+            else:
+                _, target = artifact.resolve_file_target_hash_path(
+                    src_path, artifact_path=artifact_path
+                )
             store_manager.object(url=target).upload(src_path)
+            artifact.extra_data[prefix + key] = target
+            continue
 
         if update_spec:
-            artifact_spec.extra_data[prefix + key] = item
+            artifact.extra_data[prefix + key] = item
 
 
 def get_artifact_meta(artifact):
@@ -1065,3 +1273,21 @@ def get_artifact_meta(artifact):
         extra_dataitems[k] = store_manager.object(v, key=k)
 
     return artifact_spec, extra_dataitems
+
+
+def generate_target_path(item: Artifact, artifact_path, producer):
+    # path convention: artifact_path[/{run_name}]/{iter}/{key}.{suffix}
+    # todo: add run_id here (vs in the .run() methods), support items dedup (by hash)
+    artifact_path = artifact_path or ""
+    if artifact_path and not artifact_path.endswith("/"):
+        artifact_path += "/"
+    if producer.kind == "run":
+        artifact_path += f"{producer.name}/{item.iter or 0}/"
+
+    suffix = "/"
+    if not item.is_dir:
+        suffix = os.path.splitext(item.src_path or "")[1]
+        if not suffix and item.format:
+            suffix = f".{item.format}"
+
+    return f"{artifact_path}{item.key}{suffix}"

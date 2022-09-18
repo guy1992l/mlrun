@@ -1,3 +1,17 @@
+# Copyright 2018 Iguazio
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
 from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
@@ -13,6 +27,7 @@ from tests.api.runtime_handlers.base import TestRuntimeHandlerBase
 
 class TestMPIjobRuntimeHandler(TestRuntimeHandlerBase):
     def custom_setup(self):
+        self.kind = RuntimeKinds.mpijob
         self.runtime_handler = get_runtime_handler(RuntimeKinds.mpijob)
         self.runtime_handler.wait_for_deletion_interval = 0
 
@@ -328,6 +343,12 @@ class TestMPIjobRuntimeHandler(TestRuntimeHandlerBase):
             [[self.launcher_pod, self.worker_pod]]
         )
         return mocked_responses[0].items
+
+    def _generate_get_logger_pods_label_selector(self, runtime_handler):
+        logger_pods_label_selector = super()._generate_get_logger_pods_label_selector(
+            runtime_handler
+        )
+        return f"{logger_pods_label_selector},mpi-job-role=launcher"
 
     @staticmethod
     def _generate_mpijob_crd(project, uid, status=None):

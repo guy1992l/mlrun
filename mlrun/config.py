@@ -72,7 +72,7 @@ default_config = {
     "spark_app_image": "",  # image to use for spark operator app runtime
     "spark_app_image_tag": "",  # image tag to use for spark operator app runtime
     "spark_history_server_path": "",  # spark logs directory for spark history server
-    "spark_operator_version": "spark-2",  # the version of the spark operator in use
+    "spark_operator_version": "spark-3",  # the version of the spark operator in use
     "builder_alpine_image": "alpine:3.13.1",  # builder alpine image (as kaniko's initContainer)
     "package_path": "mlrun",  # mlrun pip package
     "default_base_image": "mlrun/mlrun",  # default base image when doing .deploy()
@@ -89,6 +89,9 @@ default_config = {
     "runtimes_cleanup_interval": "300",
     # runs monitoring interval in seconds
     "runs_monitoring_interval": "30",
+    # runs monitoring debouncing interval in seconds for run with non-terminal state without corresponding k8s resource
+    # by default the interval will be - (runs_monitoring_interval * 2 ), if set will override the default
+    "runs_monitoring_missing_runtime_resources_debouncing_interval": None,
     # the grace period (in seconds) that will be given to runtime resources (after they're in terminal state)
     # before deleting them
     "runtime_resources_deletion_grace_period": "14400",
@@ -98,9 +101,20 @@ default_config = {
     "artifact_path": "",  # default artifacts path/url
     # Add {{workflow.uid}} to artifact_path unless user specified a path manually
     "enrich_artifact_path_with_workflow_id": True,
+    "artifacts": {
+        "calculate_hash": True,
+        # None is handled as False, reason we set None instead of False is that if the server have set the value to
+        # some value while the client didn't change it, the server value will be applied.
+        # But if both the server and the client set some value, we want the client to take precedence over the server.
+        # By setting the default to None we are able to differentiate between the two cases.
+        "generate_target_path_from_artifact_hash": None,
+    },
     # FIXME: Adding these defaults here so we won't need to patch the "installing component" (provazio-controller) to
     #  configure this values on field systems, for newer system this will be configured correctly
     "v3io_api": "http://v3io-webapi:8081",
+    "redis": {
+        "url": "",
+    },
     "v3io_framesd": "http://framesd:8080",
     "datastore": {"async_source_mode": "disabled"},
     # default node selector to be applied to all functions - json string base64 encoded format
@@ -115,6 +129,37 @@ default_config = {
     "default_tensorboard_logs_path": "/User/.tensorboard/{{project}}",
     # ";" separated list of notebook cell tag names to ignore e.g. "ignore-this;ignore-that"
     "ignored_notebook_tags": "",
+    # when set it will force the local=True in run_function(), set to "auto" will run local if there is no k8s
+    "force_run_local": "auto",
+    "background_tasks": {
+        # enabled / disabled
+        "timeout_mode": "enabled",
+        # timeout in seconds to wait for background task to be updated / finished by the worker responsible for the task
+        "default_timeouts": {
+            "operations": {"migrations": "3600"},
+            "runtimes": {"dask": "600"},
+        },
+    },
+    "function": {
+        "spec": {
+            "image_pull_secret": {"default": None},
+            "security_context": {
+                # default security context to be applied to all functions - json string base64 encoded format
+                # in camelCase format: {"runAsUser": 1000, "runAsGroup": 3000}
+                "default": "e30=",  # encoded empty dict
+                # see mlrun.api.schemas.function.SecurityContextEnrichmentModes for available options
+                "enrichment_mode": "disabled",
+                # default 65534 (nogroup), set to -1 to use the user unix id or
+                # function.spec.security_context.pipelines.kfp_pod_user_unix_id for kfp pods
+                "enrichment_group_id": 65534,
+                "pipelines": {
+                    # sets the user id to be used for kfp pods when enrichment mode is not disabled
+                    "kfp_pod_user_unix_id": 5,
+                },
+            },
+            "service_account": {"default": None},
+        },
+    },
     "function_defaults": {
         "image_by_kind": {
             "job": "mlrun/mlrun",
@@ -125,10 +170,29 @@ default_config = {
             "mpijob": "mlrun/ml-models",
         },
         # see enrich_function_preemption_spec for more info,
-        # and mlrun.api.schemas.functionPreemptionModes for available options
+        # and mlrun.api.schemas.function.PreemptionModes for available options
         "preemption_mode": "prevent",
     },
     "httpdb": {
+        "clusterization": {
+            # one of chief/worker
+            "role": "chief",
+            "chief": {
+                # when url is specified, it takes precedence over service and port
+                "url": "",
+                "service": "mlrun-api-chief",
+                "port": 8080,
+            },
+            "worker": {
+                "sync_with_chief": {
+                    # enabled / disabled
+                    "mode": "enabled",
+                    "interval": 15,  # seconds
+                }
+            },
+            # see mlrun.api.utils.helpers.ensure_running_on_chief
+            "ensure_function_running_on_chief_mode": "enabled",
+        },
         "port": 8080,
         "dirpath": expanduser("~/.mlrun/db"),
         "dsn": "sqlite:///db/mlrun.db?check_same_thread=false",
@@ -138,12 +202,17 @@ default_config = {
         "password": "",
         "token": "",
         "logs_path": "./db/logs",
+        # when set, these will replace references to the data_volume with the real_path
         "data_volume": "",
         "real_path": "",
+        # comma delimited prefixes of paths allowed through the /files API (v3io & the real_path are always allowed).
+        # These paths must be schemas (cannot be used for local files). For example "s3://mybucket,gcs://"
+        "allowed_file_paths": "",
         "db_type": "sqldb",
         "max_workers": 64,
         # See mlrun.api.schemas.APIStates for options
         "state": "online",
+        "retry_api_call_on_exception": "enabled",
         "db": {
             "commit_retry_timeout": 30,
             "commit_retry_interval": 3,
@@ -159,6 +228,8 @@ default_config = {
                 "file_format": "db_backup_%Y%m%d%H%M.db",
                 "use_rotation": True,
                 "rotation_limit": 3,
+                # default is 16MB, max 1G, for more info https://dev.mysql.com/doc/refman/8.0/en/packet-too-large.html
+                "max_allowed_packet": 64000000,  # 64MB
             },
             # None will set this to be equal to the httpdb.max_workers
             "connections_pool_size": None,
@@ -216,6 +287,7 @@ default_config = {
         },
         "projects": {
             "leader": "mlrun",
+            "retry_leader_request_on_exception": "enabled",
             "followers": "",
             # This is used as the interval for the sync loop both when mlrun is leader and follower
             "periodic_sync_interval": "1 minute",
@@ -231,6 +303,9 @@ default_config = {
             # setting the docker registry to be used for built images, can include the repository as well, e.g.
             # index.docker.io/<username>, if not included repository will default to mlrun
             "docker_registry": "",
+            # dockerconfigjson type secret to attach to kaniko pod.
+            # For amazon ECR, the secret is expected to provide AWS credentials. Leave empty to use EC2 IAM policy.
+            # https://github.com/GoogleContainerTools/kaniko#pushing-to-amazon-ecr
             "docker_registry_secret": "",
             # whether to allow the docker registry we're pulling from to be insecure. "enabled", "disabled" or "auto"
             # which will resolve by the existence of secret
@@ -242,8 +317,10 @@ default_config = {
             # pip install <requirement_specifier>, e.g. mlrun==0.5.4, mlrun~=0.5,
             # git+https://github.com/mlrun/mlrun@development. by default uses the version
             "mlrun_version_specifier": "",
-            "kaniko_image": "gcr.io/kaniko-project/executor:v1.6.0",  # kaniko builder image
+            "kaniko_image": "gcr.io/kaniko-project/executor:v1.8.0",  # kaniko builder image
             "kaniko_init_container_image": "alpine:3.13.1",
+            # image for kaniko init container when docker registry is ECR
+            "kaniko_aws_cli_image": "amazon/aws-cli:2.7.10",
             # additional docker build args in json encoded base64 format
             "build_args": "",
             "pip_ca_secret_name": "",
@@ -297,6 +374,7 @@ default_config = {
         "data_prefixes": {
             "default": "v3io:///projects/{project}/FeatureStore/{name}/{kind}",
             "nosql": "v3io:///projects/{project}/FeatureStore/{name}/{kind}",
+            "redisnosql": "redis:///projects/{project}/FeatureStore/{name}/{kind}",
         },
         "default_targets": "parquet,nosql",
         "default_job_image": "mlrun/mlrun",
@@ -319,7 +397,7 @@ default_config = {
         },
     },
     "storage": {
-        # What type of auto-mount to use for functions. Can be one of: none, auto, v3io_credentials, v3io_fuse, pvc.
+        # What type of auto-mount to use for functions. One of: none, auto, v3io_credentials, v3io_fuse, pvc, s3, env.
         # Default is auto - which is v3io_credentials when running on Iguazio. If not Iguazio: pvc if the
         # MLRUN_PVC_MOUNT env is configured or auto_mount_params contain "pvc_name". Otherwise will do nothing (none).
         "auto_mount_type": "auto",
@@ -338,6 +416,11 @@ default_config = {
         "node_selector": "e30=",
         # encoded empty list
         "tolerations": "W10=",
+    },
+    "http_retry_defaults": {
+        "max_retries": 3,
+        "backoff_factor": 1,
+        "status_codes": [500, 502, 503, 504],
     },
 }
 
@@ -424,7 +507,7 @@ class Config:
     ):
         """
         decodes and loads the config attribute to expected type
-        :param attribute_path: the path in the default_config e.g preemptible_nodes.node_selector
+        :param attribute_path: the path in the default_config e.g. preemptible_nodes.node_selector
         :param expected_type: the object type valid values are : `dict`, `list` etc...
         :return: the expected type instance
         """
@@ -469,6 +552,11 @@ class Config:
             "preemptible_nodes.tolerations", list
         )
 
+    def get_default_function_security_context(self) -> dict:
+        return self.decode_base64_config_and_load_to_object(
+            "function.spec.security_context.default", dict
+        )
+
     def is_preemption_nodes_configured(self):
         if (
             not self.get_preemptible_tolerations()
@@ -492,6 +580,27 @@ class Config:
         return valid_function_priority_class_names
 
     @staticmethod
+    def is_running_on_iguazio() -> bool:
+        return config.igz_version is not None and config.igz_version != ""
+
+    @staticmethod
+    def get_security_context_enrichment_group_id(user_unix_id: int) -> int:
+        enrichment_group_id = int(
+            config.function.spec.security_context.enrichment_group_id
+        )
+
+        # if enrichment group id is -1 we set group id to user unix id
+        if enrichment_group_id == -1:
+            if user_unix_id is None:
+                raise mlrun.errors.MLRunInvalidArgumentError(
+                    "User unix id is required to populate group id when enrichment group id is -1."
+                    "See mlrun.config.function.spec.security_context.enrichment_group_id for more details."
+                )
+            return user_unix_id
+
+        return enrichment_group_id
+
+    @staticmethod
     def get_parsed_igz_version() -> typing.Optional[semver.VersionInfo]:
         if not config.igz_version:
             return None
@@ -503,6 +612,25 @@ class Config:
             # like 3.0_b177_20210806003728
             semver_compatible_igz_version = config.igz_version.split("_")[0]
             return semver.VersionInfo.parse(f"{semver_compatible_igz_version}.0")
+
+    def verify_security_context_enrichment_mode_is_allowed(self):
+
+        # TODO: move SecurityContextEnrichmentModes to a different package so that we could use it here without
+        #  importing mlrun.api
+        if config.function.spec.security_context.enrichment_mode == "disabled":
+            return
+
+        igz_version = self.get_parsed_igz_version()
+        if not igz_version:
+            raise mlrun.errors.MLRunInvalidArgumentError(
+                "Unable to determine if security context enrichment mode is allowed. Missing iguazio version"
+            )
+
+        if igz_version < semver.VersionInfo.parse("3.5.1-b1"):
+            raise mlrun.errors.MLRunInvalidArgumentError(
+                f"Security context enrichment mode enabled (override/retain) "
+                f"is not allowed for iguazio version: {igz_version} < 3.5.1"
+            )
 
     def resolve_kfp_url(self, namespace=None):
         if config.kfp_url:
@@ -521,6 +649,25 @@ class Config:
             # TODO: When we'll move to kfp 1.4.0 (server side) it should be resolved
             return f"http://ml-pipeline.{namespace}.svc.cluster.local:8888"
         return None
+
+    def resolve_chief_api_url(self) -> str:
+        if self.httpdb.clusterization.chief.url:
+            return self.httpdb.clusterization.chief.url
+        if not self.httpdb.clusterization.chief.service:
+            raise mlrun.errors.MLRunNotFoundError(
+                "For resolving chief url, chief service name must be provided"
+            )
+        if self.namespace is None:
+            raise mlrun.errors.MLRunNotFoundError(
+                "For resolving chief url, namespace must be provided"
+            )
+
+        chief_api_url = f"http://{self.httpdb.clusterization.chief.service}.{self.namespace}.svc.cluster.local"
+        if config.httpdb.clusterization.chief.port:
+            chief_api_url = f"{chief_api_url}:{self.httpdb.clusterization.chief.port}"
+
+        self.httpdb.clusterization.chief.url = chief_api_url
+        return self.httpdb.clusterization.chief.url
 
     @staticmethod
     def get_storage_auto_mount_params():
@@ -561,14 +708,21 @@ class Config:
             )
         return resources
 
+    def resolve_runs_monitoring_missing_runtime_resources_debouncing_interval(self):
+        return (
+            float(self.runs_monitoring_missing_runtime_resources_debouncing_interval)
+            if self.runs_monitoring_missing_runtime_resources_debouncing_interval
+            else float(config.runs_monitoring_interval) * 2.0
+        )
+
     @staticmethod
     def get_default_function_pod_requirement_resources(
         requirement: str, with_gpu: bool = True
     ):
         """
         :param requirement: kubernetes requirement resource one of the following : requests, limits
-        :param with_gpu: whether to return requirement resources with nvidia.com/gpu field (e.g you cannot specify GPU
-         requests without specifying GPU limits) https://kubernetes.io/docs/tasks/manage-gpus/scheduling-gpus/
+        :param with_gpu: whether to return requirement resources with nvidia.com/gpu field (e.g. you cannot specify
+         GPU requests without specifying GPU limits) https://kubernetes.io/docs/tasks/manage-gpus/scheduling-gpus/
         :return: a dict containing the defaults resources (cpu, memory, nvidia.com/gpu)
         """
         resources: dict = copy.deepcopy(config.default_function_pod_resources.to_dict())
@@ -681,6 +835,11 @@ class Config:
     def iguazio_api_url(self, value):
         self._iguazio_api_url = value
 
+    def is_api_running_on_k8s(self):
+        # determine if the API service is attached to K8s cluster
+        # when there is a cluster the .namespace is set
+        return True if mlrun.mlconf.namespace else False
+
 
 # Global configuration
 config = Config.from_dict(default_config)
@@ -702,7 +861,8 @@ def _do_populate(env=None):
     global config
 
     if "MLRUN_ENV_FILE" in os.environ:
-        dotenv.load_dotenv(os.environ["MLRUN_ENV_FILE"], override=True)
+        env_file = os.path.expanduser(os.environ["MLRUN_ENV_FILE"])
+        dotenv.load_dotenv(env_file, override=True)
 
     if not config:
         config = Config.from_dict(default_config)
@@ -747,6 +907,8 @@ def _validate_config(config):
         )
     except AttributeError:
         pass
+
+    config.verify_security_context_enrichment_mode_is_allowed()
 
 
 def _convert_resources_to_str(config: dict = None):
