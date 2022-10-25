@@ -152,7 +152,7 @@ class V3ioStore(DataStore):
             buffer_offset += chunk_size
 
     def put(self, key, data, append=False):
-        return self._put(key, data)
+        http_put(self.url + self._join(key), data, self.headers, None)
 
     def stat(self, key):
         head = http_head(self.url + self._join(key), self.headers)
