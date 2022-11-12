@@ -1082,7 +1082,7 @@ class MLClientCtx(object):
 def _cast_result(value):
     if isinstance(value, (int, str, float)):
         return value
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         return [_cast_result(v) for v in value]
     if isinstance(value, dict):
         return {k: _cast_result(v) for k, v in value.items()}
