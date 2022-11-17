@@ -75,6 +75,10 @@ class MonitorSpec(ModelObj):
 #       * x_ref and y_ref are the reference data (aka baseline data)
 #       * y_true is the ground truth (aka actual values)
 class Monitor(ABC):
+
+    DEFAULT_Y_PRED_SUFFIX = "_pred"
+    DEFAULT_Y_TRUE_SUFFIX = "_true"
+
     def __init__(
         self,
         context: mlrun.MLClientCtx,
@@ -84,8 +88,9 @@ class Monitor(ABC):
         x_ref: Union[pd.DataFrame, str] = None,
         y_ref: Union[pd.DataFrame, str] = None,
         y_columns_names: List[str] = None,
-        y_pred_suffix: str = None,
-        y_true_suffix: str = None,
+        y_pred_suffix: str = DEFAULT_Y_PRED_SUFFIX,
+        y_true_suffix: str = DEFAULT_Y_TRUE_SUFFIX,
+        selected_columns: List[str] = None,
         # Online mode:
         endpoint_id: str = None,
         tsdb_kwargs: Dict[str, str] = None,
@@ -107,6 +112,7 @@ class Monitor(ABC):
         self._y_columns_names = y_columns_names
         self._y_pred_suffix = y_pred_suffix
         self._y_true_suffix = y_true_suffix
+        self._selected_columns = selected_columns
 
         # Store online mode properties:
         self._endpoint_id = endpoint_id
@@ -121,8 +127,6 @@ class Monitor(ABC):
         self._monitor_id = monitor_id
 
         # Common extra data:
-        self._x_ref_statistics = None
-        self._y_ref_statistics = None
         self._feature_importance = None
 
         # Set up handlers:
@@ -172,6 +176,22 @@ class Monitor(ABC):
     def feature_importance(self) -> Dict[str, float]:
         return self._feature_importance
 
+    @property
+    def y_columns_names(self) -> List[str]:
+        return self._y_columns_names
+
+    @property
+    def y_pred_suffix(self) -> str:
+        return self._y_pred_suffix
+
+    @property
+    def y_true_suffix(self) -> str:
+        return self._y_true_suffix
+
+    @property
+    def selected_columns(self) -> List[str]:
+        return self._selected_columns
+
     def get_mlrun_object(self, key: str) -> Union[MLRunObjectType, None]:
         return self._mlrun_objects.get(key, None)
 
@@ -195,7 +215,64 @@ class Monitor(ABC):
         )
 
     def load_x_ref(self):
-        pass
+        # If `x_ref` was not given, try to take it from the extra data of the model artifact:
+        if self._x_ref is None:
+            # Check if a model url was given:
+            if "model" not in self._mlrun_objects:
+                raise mlrun.errors.MLRunRuntimeError(
+                    "Cannot load 'x_ref'. 'x_ref' was not provided and a model url was not provided as well."
+                )
+            # Get the `x_ref` out of the model artifact's extra data:
+            model_extra_data = self.get_mlrun_object(key="model").spec.extra_data
+            if "ref_data" not in model_extra_data:
+                raise mlrun.errors.MLRunRuntimeError(
+                    "Cannot load 'x_ref'. 'x_ref' was not provided and not appeared in the provided model's extra data "
+                    "(looking for key: 'ref_data' in the extra data dictionary)."
+                )
+            self.load_mlrun_object(url=model_extra_data["ref_data"], key="x_ref")
+            self._x_ref = self.get_mlrun_object(key="x_ref")
+
+        # Load the dataset:
+        self._x_ref = self.load_dataset(url=self._x_ref)
+
+        # Look for y columns to split it to `y_ref` if it was not provided. If it was, ignore all y columns:
+        if self.y_columns_names is not None:
+            # Look for the y columns:
+            y_columns = set(self.y_columns_names) & set(self._x_ref.columns)
+            # Found y columns, validate all were found and not some:
+            if len(y_columns) != 0:
+                if len(y_columns) != len(self.y_columns_names):
+                    raise mlrun.errors.MLRunInvalidArgumentError(
+                        f"The following y columns: "
+                        f"{set(self.y_columns_names) - y_columns} "
+                        f"were not found in the 'x_ref' and 'y_ref' datasets."
+                        f""
+                        f"Expecting for: {self.y_columns_names}"
+                    )
+                # Update `y_ref` in case it was not provided:
+                if self.y_ref is None:
+                    self._y_ref = self._x_ref[y_columns]
+                # Remove the y columns from the x dataset:
+                self._x_ref.drop(columns=y_columns, inplace=True)
+
+        # Clear the non-selected columns by the user:
+        if self.selected_columns is not None:
+            # Validate all selected columns found and not some:
+            selected_x_columns = set(self.selected_columns) & set(self._x_ref.columns)
+            selected_y_columns = set(self.selected_columns) & set(self._y_ref.columns)
+            if len(selected_x_columns | selected_y_columns) != len(
+                self.selected_columns
+            ):
+                raise mlrun.errors.MLRunInvalidArgumentError(
+                    f"The following selected columns: "
+                    f"{list(set(self.selected_columns) - (selected_x_columns | selected_y_columns))} "
+                    f"were not found in the 'x_ref' and 'y_ref' datasets."
+                    f""
+                    f"Expecting for: {self.selected_columns}"
+                )
+            # Leave only selected columns:
+            self._x_ref = self._x_ref[selected_x_columns]
+            self._y_ref = self._y_ref[selected_y_columns]
 
     def load_y_ref(self):
         # Check if it was already loaded as part of `x_ref`:
@@ -205,18 +282,21 @@ class Monitor(ABC):
     def load_x(self):
         if self.is_realtime_serving:
             return
-        if isinstance(self._x, str):
-            self._x = mlrun.get_dataitem(url=self._x).as_df()
-        elif not isinstance(self._x, pd.DataFrame):
+        if self._x is None:
+            raise mlrun.errors.MLRunRuntimeError(
+                "Cannot load `x`. `x` was not provided."
+            )
+        self._x = self.load_dataset(dataset=self._x)
+        if not isinstance(self._x, pd.DataFrame):
             raise mlrun.errors.MLRunInvalidArgumentError()
 
     def load_y_pred(self):
-        # Check if it was already loaded as part of `x_ref`:
+        # Check if it was already loaded as part of `x`:
         if isinstance(self._y_pred, pd.DataFrame):
             return
 
     def load_y_true(self):
-        # Check if it was already loaded as part of `x_ref`:
+        # Check if it was already loaded as part of `x`:
         if isinstance(self._y_true, pd.DataFrame):
             return
 
@@ -253,21 +333,28 @@ class Monitor(ABC):
             self._validate_offline_mode()
 
     def _validate_offline_mode(self):
+        """
+        1. Validate all offline arguments.
+        """
         pass
 
     def _validate_online_mode(self):
+        """
+        1. Validate all online arguments.
+        """
         pass
 
     def _init_offline_mode(self):
         """
-        1. Prepare all given datasets to be DataItems.
-        2. Create a monitor ID if not provided.
+        1. Create a monitor ID if not provided.
         """
         if self._monitor_id is None:
             self._monitor_id = hashlib.sha224(str(datetime.now()).encode()).hexdigest()
 
     def _init_online_mode(self):
-        """ """
+        """
+        1. Init the TSDB API object to connect to the configured TSDB (V3IO's TSDB or Prometheus).
+        """
         pass
 
     def _get_mlrun_objects(self):
@@ -283,6 +370,8 @@ class Monitor(ABC):
     ):
         # Initialize the monitor class from policy:
         monitor = cls.from_policy(context=context, policy=policy)
+
+        monitor.validate()
 
         # Load the user's required assets before the run:
         monitor.load()

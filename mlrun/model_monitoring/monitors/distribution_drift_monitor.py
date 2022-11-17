@@ -117,9 +117,9 @@ class DistributionDriftMonitor(Monitor, ABC):
         distribution_distance_metrics: List[
             Tuple[str, dict]
         ] = None,  # The functions are of type: Callable[[pd.Series, pd.Series], float]
-        columns: List[str] = None,
+
         histogram_bins: int = 20,
-        weights: Union[np.ndarray, List[float], Dict[str, float], str] = None,
+        weights: Union[pd.DataFrame, Dict[str, float], str] = None,
     ):
         self._statistic_metrics = self._parse_metrics(
             metrics_class=StatisticMetrics,
@@ -137,9 +137,11 @@ class DistributionDriftMonitor(Monitor, ABC):
                 else self._DEFAULT_DISTRIBUTION_DISTANCE_METRICS
             ),
         )
-        self._columns = columns
         self._histogram_bins = histogram_bins
         self._weights = weights
+
+        self._x_ref_statistics = None
+        self._y_ref_statistics = None
 
     @property
     def x_ref_statistics(self) -> dict:
@@ -159,6 +161,10 @@ class DistributionDriftMonitor(Monitor, ABC):
 
         if isinstance(self._weights, str):
             if self._weights == self.FEATURE_IMPORTANCE_WEIGHTS_VALUE:
+                if self.get_mlrun_object(key="model") is None:
+                    raise mlrun.errors.MLRunInvalidArgumentError(
+                        "Weights cannot be set to 'feature_importance' as there is no model provided to the monitor."
+                    )
                 self.load_feature_importance()
                 if self.feature_importance is None:
                     raise mlrun.errors.MLRunInvalidArgumentError(
@@ -168,6 +174,9 @@ class DistributionDriftMonitor(Monitor, ABC):
                 self._weights = self.feature_importance
             else:
                 self._weights = self.load_dataset(url=self._weights)
+
+            if isinstance(self._weights, pd.DataFrame):
+                self._weights = self._weights.to_dict()
 
     def calculate_dataset_histograms(
         self, dataset: pd.DataFrame
@@ -184,7 +193,7 @@ class DistributionDriftMonitor(Monitor, ABC):
         calculations: List[pd.DataFrame] = []
         columns: List[str] = []
 
-        # Go over the statistics metrics and calculate:
+        # Go over the statistics metrics and calculate while collecting the columns names:
         for metric_name, (metric_function, metric_kwargs) in self._statistic_metrics:
             calculations.append(metric_function(dataset, **metric_kwargs))
             columns.append(metric_name)
@@ -200,13 +209,18 @@ class DistributionDriftMonitor(Monitor, ABC):
         self,
         dataset_histograms_1: Dict[str, Tuple[np.ndarray, int]],
         dataset_histograms_2: Dict[str, Tuple[np.ndarray, int]],
-    ):
+    ) -> Dict[str, Dict[str, float]]:
+        # Set up a list to hold the metrics calculations data frames:
         calculations = []
+
+        # Go over the metric and call them for each feature:
         for metric_name, (
             metric_function,
             metric_kwargs,
         ) in self._distribution_distance_metrics:
-            metric_scores = []
+            # Set up a list to hold the metric scores across all features:
+            metric_scores: List[float] = []
+            # Go over the columns (features) and calculate the score using the metric function:
             for column in dataset_histograms_1:
                 metric_scores.append(
                     metric_function(
@@ -215,6 +229,7 @@ class DistributionDriftMonitor(Monitor, ABC):
                         **metric_kwargs
                     )
                 )
+            # Collect the scores of the metric as a data frame:
             calculations.append(
                 pd.DataFrame(
                     metric_scores,
@@ -222,7 +237,12 @@ class DistributionDriftMonitor(Monitor, ABC):
                     columns=[metric_name],
                 )
             )
-        return pd.concat(objs=calculations, axis=1)
+
+        # Concatenate the results into a single data frame:
+        calculations = pd.concat(objs=calculations, axis=1)
+
+        # Return the dictionary representation of the results:
+        return calculations.T.to_dict()
 
     def calculate_drift_score(self):
         pass
