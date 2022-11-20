@@ -4,30 +4,19 @@ from abc import ABC, abstractmethod
 from enum import Enum
 import hashlib
 from datetime import datetime
-from collections import defaultdict
-
+import re
 import numpy as np
 import pandas as pd
 
 import mlrun
 from mlrun.feature_store import FeatureSet, FeatureVector
 from mlrun.model import ModelObj
-from mlrun.artifacts import Artifact
+from mlrun.artifacts import Artifact, ModelArtifact
 from mlrun.datastore import is_store_uri, store_manager
 
 
 ModelType = object
-MLRunObjectType = Union[Artifact, FeatureSet, FeatureVector]
-
-
-def get_artifact(uri: str) -> Artifact:
-    pass
-
-
-def get_extra_data(
-    artifact: Artifact,
-) -> Dict[str, Union[str, float, int, bool, mlrun.DataItem]]:
-    pass
+MLRunObjectType = Union[Artifact, ModelArtifact, FeatureSet, FeatureVector]
 
 
 def load_model(path_or_uri: str) -> ModelType:
@@ -74,6 +63,7 @@ class MonitorSpec(ModelObj):
 # TODO: Mention in doc string that:
 #       * x_ref and y_ref are the reference data (aka baseline data)
 #       * y_true is the ground truth (aka actual values)
+#       * Possible overriding: __init__, validate, load ,run
 class Monitor(ABC):
 
     DEFAULT_Y_PRED_SUFFIX = "_pred"
@@ -206,99 +196,197 @@ class Monitor(ABC):
         pass
 
     def load_model(self):
-        raise NotImplementedError(
-            "The generic loading model `load_model` method is yet to be implemented. Please consider inheriting this "
-            "class and override the method or simply write its logic in the `load` method instead."
-            ""
-            "You may use the `mlrun.framework.{your-framework-of-choice}`'s ModelHandler class or call the "
+        raise RuntimeError(
+            "The generic loading model `load_model` method is not implemented. Please consider inheriting this class "
+            "and override the method or simply write its logic in the `load` method instead.\n"
+            "\n"
+            "You may use the `mlrun.frameworks.{your-framework-of-choice}`'s ModelHandler class or call the "
             "`mlrun.artifacts.get_model` function."
         )
 
     def load_x_ref(self):
-        # If `x_ref` was not given, try to take it from the extra data of the model artifact:
+        # Make sure `x_ref` is available for loading:
         if self._x_ref is None:
-            # Check if a model url was given:
-            if "model" not in self._mlrun_objects:
-                raise mlrun.errors.MLRunRuntimeError(
-                    "Cannot load 'x_ref'. 'x_ref' was not provided and a model url was not provided as well."
-                )
-            # Get the `x_ref` out of the model artifact's extra data:
-            model_extra_data = self.get_mlrun_object(key="model").spec.extra_data
-            if "ref_data" not in model_extra_data:
-                raise mlrun.errors.MLRunRuntimeError(
-                    "Cannot load 'x_ref'. 'x_ref' was not provided and not appeared in the provided model's extra data "
-                    "(looking for key: 'ref_data' in the extra data dictionary)."
-                )
-            self.load_mlrun_object(url=model_extra_data["ref_data"], key="x_ref")
-            self._x_ref = self.get_mlrun_object(key="x_ref")
+            raise mlrun.errors.MLRunRuntimeError(
+                "Cannot load `x_ref`."
+                ""
+                "`x_ref` can be provided manually to the class initializer or via the extra data of a model artifact "
+                "(looking for key: 'ref_data' in the extra data dictionary)."
+            )
 
         # Load the dataset:
-        self._x_ref = self.load_dataset(url=self._x_ref)
+        self._x_ref = self._load_dataset(dataset=self._x_ref)
 
         # Look for y columns to split it to `y_ref` if it was not provided. If it was, ignore all y columns:
         if self.y_columns_names is not None:
             # Look for the y columns:
             y_columns = set(self.y_columns_names) & set(self._x_ref.columns)
-            # Found y columns, validate all were found and not some:
             if len(y_columns) != 0:
-                if len(y_columns) != len(self.y_columns_names):
-                    raise mlrun.errors.MLRunInvalidArgumentError(
-                        f"The following y columns: "
-                        f"{set(self.y_columns_names) - y_columns} "
-                        f"were not found in the 'x_ref' and 'y_ref' datasets."
-                        f""
-                        f"Expecting for: {self.y_columns_names}"
-                    )
                 # Update `y_ref` in case it was not provided:
                 if self.y_ref is None:
                     self._y_ref = self._x_ref[y_columns]
+                    self.load_y_ref()
                 # Remove the y columns from the x dataset:
                 self._x_ref.drop(columns=y_columns, inplace=True)
 
         # Clear the non-selected columns by the user:
         if self.selected_columns is not None:
-            # Validate all selected columns found and not some:
-            selected_x_columns = set(self.selected_columns) & set(self._x_ref.columns)
-            selected_y_columns = set(self.selected_columns) & set(self._y_ref.columns)
-            if len(selected_x_columns | selected_y_columns) != len(
-                self.selected_columns
-            ):
-                raise mlrun.errors.MLRunInvalidArgumentError(
-                    f"The following selected columns: "
-                    f"{list(set(self.selected_columns) - (selected_x_columns | selected_y_columns))} "
-                    f"were not found in the 'x_ref' and 'y_ref' datasets."
-                    f""
-                    f"Expecting for: {self.selected_columns}"
-                )
             # Leave only selected columns:
-            self._x_ref = self._x_ref[selected_x_columns]
-            self._y_ref = self._y_ref[selected_y_columns]
+            self._x_ref = self._x_ref[
+                set(self.selected_columns) & set(self._x_ref.columns)
+            ]
 
     def load_y_ref(self):
-        # Check if it was already loaded as part of `x_ref`:
-        if isinstance(self._y_ref, pd.DataFrame):
+        # Make sure `y_ref` is available for loading:
+        if self._y_ref is None:
+            # `y_ref` was not provided, try to get it from the `x_ref` dataset:
+            self._context.logger.info(
+                "`y_ref` was not provided, looking for `y_ref` in `x_ref`"
+            )
+            self.load_x_ref()
+            if self._y_ref is None:
+                raise mlrun.errors.MLRunRuntimeError(
+                    f"Cannot load `y_ref`.\n"
+                    f"\n"
+                    f"`y_ref` can be provided in the following ways:\n"
+                    f"* Via the `y_ref` attribute to the class initializer.\n"
+                    f"* Via the `x_ref` attribute to the class initializer. The columns for `y_ref` will be taken "
+                    f"from the `y_columns_names` attribute. `y_columns_names` can be also read from the model artifact "
+                    f"if it was logged with it. The available `y_columns_names` now are: {self.y_columns_names}"
+                    f"* Via the extra data of a model artifact (looking for key: 'ref_data' in the extra data "
+                    f"dictionary). The `y_columns_names` must match to the columns in the 'ref_data' of the model."
+                )
             return
 
+        # Load the dataset:
+        self._y_ref = self._load_dataset(dataset=self._y_ref)
+
+        # Clear the non-selected columns by the user:
+        if self.selected_columns is not None:
+            # Leave only selected columns:
+            self._y_ref = self._y_ref[
+                set(self.selected_columns) & set(self._y_ref.columns)
+            ]
+
     def load_x(self):
+        # Make sure `y_ref` is available for loading:
         if self.is_realtime_serving:
             return
         if self._x is None:
             raise mlrun.errors.MLRunRuntimeError(
                 "Cannot load `x`. `x` was not provided."
             )
-        self._x = self.load_dataset(dataset=self._x)
-        if not isinstance(self._x, pd.DataFrame):
-            raise mlrun.errors.MLRunInvalidArgumentError()
+
+        # Load the dataset:
+        self._x = self._load_dataset(dataset=self._x)
+
+        # Look for y columns to split them into `y_pred` and `y_true` if they were not provided. If they were, ignore
+        # all y columns:
+        if self.y_columns_names is not None:
+            # Look for the y pred columns:
+            y_pred_columns = set(
+                [f"{name}{self.y_pred_suffix}" for name in self.y_columns_names]
+            ) & set(self._x.columns)
+            if len(y_pred_columns) != 0:
+                # Update `y_pred` in case it was not provided:
+                if self.y_pred is None:
+                    self._y_pred = self._x[y_pred_columns]
+                    self._y_pred.rename(
+                        columns={
+                            name: re.sub(f"{self.y_pred_suffix}$", "", name)
+                            for name in self._y_pred.columns
+                        },
+                        inplace=True,
+                    )
+                    self.load_y_pred()
+                # Remove the y pred columns from the x dataset:
+                self._x.drop(columns=y_pred_columns, inplace=True)
+
+            # Look for the y true columns:
+            y_true_columns = set(
+                [f"{name}{self.y_true_suffix}" for name in self.y_columns_names]
+            ) & set(self._x.columns)
+            if len(y_true_columns) != 0:
+                # Update `y_true` in case it was not provided:
+                if self.y_true is None:
+                    self._y_true = self._x[y_true_columns]
+                    self._y_true.rename(
+                        columns={
+                            name: re.sub(f"{self.y_true_suffix}$", "", name)
+                            for name in self._y_true.columns
+                        },
+                        inplace=True,
+                    )
+                    self.load_y_true()
+                # Remove the y true columns from the x dataset:
+                self._x.drop(columns=y_true_columns, inplace=True)
+
+        # Clear the non-selected columns by the user:
+        if self.selected_columns is not None:
+            # Leave only selected columns:
+            self._x = self._x[set(self.selected_columns) & set(self._x.columns)]
 
     def load_y_pred(self):
-        # Check if it was already loaded as part of `x`:
-        if isinstance(self._y_pred, pd.DataFrame):
+        # Make sure `y_ref` is available for loading:
+        if self._y_pred is None:
+            # `y_pred` was not provided, try to get it from the `x` dataset:
+            self._context.logger.info(
+                "`y_pred` was not provided, looking for `y_pred` in `x`"
+            )
+            self.load_x()
+            if self._y_pred is None:
+                raise mlrun.errors.MLRunRuntimeError(
+                    f"Cannot load `y_pred`.\n"
+                    f"\n"
+                    f"`y_pred` can be provided in the following ways:\n"
+                    f"* Via the `y_pred` attribute to the class initializer.\n"
+                    f"* Via the `x` attribute to the class initializer. The columns for `y_pred` will be taken "
+                    f"from the `y_columns_names` attribute with the `y_pred_suffix` suffix. `y_columns_names` can be "
+                    f"also read from the model artifact if it was logged with it. The available `y_columns_names` "
+                    f"now are: {self.y_columns_names}"
+                )
             return
 
+        # Load the dataset:
+        self._y_pred = self._load_dataset(dataset=self._y_pred)
+
+        # Clear the non-selected columns by the user:
+        if self.selected_columns is not None:
+            # Leave only selected columns:
+            self._y_pred = self._y_pred[
+                set(self.selected_columns) & set(self._y_ref.columns)
+            ]
+
     def load_y_true(self):
-        # Check if it was already loaded as part of `x`:
-        if isinstance(self._y_true, pd.DataFrame):
+        # Make sure `y_ref` is available for loading:
+        if self._y_true is None:
+            # `y_true` was not provided, try to get it from the `x` dataset:
+            self._context.logger.info(
+                "`y_true` was not provided, looking for `y_true` in `x`"
+            )
+            self.load_x()
+            if self._y_pred is None:
+                raise mlrun.errors.MLRunRuntimeError(
+                    f"Cannot load `y_true`.\n"
+                    f"\n"
+                    f"`y_true` can be provided in the following ways:\n"
+                    f"* Via the `y_true` attribute to the class initializer.\n"
+                    f"* Via the `x` attribute to the class initializer. The columns for `y_true` will be taken "
+                    f"from the `y_columns_names` attribute with the `y_true_suffix` suffix. `y_columns_names` can be "
+                    f"also read from the model artifact if it was logged with it. The available `y_columns_names` "
+                    f"now are: {self.y_columns_names}"
+                )
             return
+
+        # Load the dataset:
+        self._y_true = self._load_dataset(dataset=self._y_true)
+
+        # Clear the non-selected columns by the user:
+        if self.selected_columns is not None:
+            # Leave only selected columns:
+            self._y_true = self._y_true[
+                set(self.selected_columns) & set(self._y_ref.columns)
+            ]
 
     def load_feature_importance(self):
         # Check if a model uri was given:
@@ -362,6 +450,41 @@ class Monitor(ABC):
             if isinstance(attribute, str) and is_store_uri(attribute):
                 self.load_mlrun_object(url=attribute, key=attribute_name.lstrip("_"))
 
+        # Check if a model url was given:
+        if "model" not in self._mlrun_objects:
+            return
+
+        # Get the model artifact:
+        model_artifact: ModelArtifact = self.get_mlrun_object(key="model")
+
+        # Look for reference data in the extra data in case 'x_ref' was not provided:
+        if self.x_ref is None:
+            self._x_ref = model_artifact.spec.extra_data.get("ref_data", None)
+
+        # Look for feature importance in the extra data:
+        self._feature_importance = model_artifact.spec.extra_data.get(
+            "feature_importance", None
+        )
+
+        # Get the y column names (outputs) from the model artifact if available:
+        if self.y_columns_names is None and len(model_artifact.spec.outputs) != 0:
+            self._y_columns_names = [
+                output.name for output in model_artifact.spec.outputs
+            ]
+
+    @staticmethod
+    def _load_dataset(dataset: Union[str, mlrun.DataItem, pd.DataFrame]) -> pd.DataFrame:
+        # If it's a loaded dataframe, simply return:
+        if isinstance(dataset, pd.DataFrame):
+            return dataset
+
+        # If it's a path to a file or a uri of a dataset artifact, get the DataItem:
+        if isinstance(dataset, str):
+            dataset = mlrun.get_dataitem(url=dataset)
+
+        # Parse into pandas dataframe and return:
+        return dataset.as_df()
+
     @classmethod
     def handler(
         cls,
@@ -370,8 +493,6 @@ class Monitor(ABC):
     ):
         # Initialize the monitor class from policy:
         monitor = cls.from_policy(context=context, policy=policy)
-
-        monitor.validate()
 
         # Load the user's required assets before the run:
         monitor.load()

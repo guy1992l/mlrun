@@ -111,13 +111,32 @@ class DistributionDriftMonitor(Monitor, ABC):
 
     def __init__(
         self,
+        context: mlrun.MLClientCtx,
+        monitor_type: Union[MonitorType, str],
+        is_realtime_serving: bool,
+        model: str = None,
+        x_ref: Union[pd.DataFrame, str] = None,
+        y_ref: Union[pd.DataFrame, str] = None,
+        y_columns_names: List[str] = None,
+        y_pred_suffix: str = Monitor.DEFAULT_Y_PRED_SUFFIX,
+        y_true_suffix: str = Monitor.DEFAULT_Y_TRUE_SUFFIX,
+        selected_columns: List[str] = None,
+        # Online mode:
+        endpoint_id: str = None,
+        tsdb_kwargs: Dict[str, str] = None,
+        from_date: str = None,
+        to_date: str = None,
+        # Offline mode:
+        x: Union[pd.DataFrame, str] = None,
+        y_pred: Union[pd.DataFrame, str] = None,
+        y_true: Union[pd.DataFrame, str] = None,
+        monitor_id: str = None,
         statistic_metrics: List[
             Tuple[str, dict],
         ] = None,  # The functions are of type: Callable[[pd.DataFrame], pd.DataFrame]
         distribution_distance_metrics: List[
             Tuple[str, dict]
         ] = None,  # The functions are of type: Callable[[pd.Series, pd.Series], float]
-
         histogram_bins: int = 20,
         weights: Union[pd.DataFrame, Dict[str, float], str] = None,
     ):
@@ -142,6 +161,27 @@ class DistributionDriftMonitor(Monitor, ABC):
 
         self._x_ref_statistics = None
         self._y_ref_statistics = None
+
+        super().__init__(
+            context=context,
+            monitor_type=monitor_type,
+            is_realtime_serving=is_realtime_serving,
+            model=model,
+            x_ref=x_ref,
+            y_ref=y_ref,
+            y_columns_names=y_columns_names,
+            y_pred_suffix=y_pred_suffix,
+            y_true_suffix=y_true_suffix,
+            selected_columns=selected_columns,
+            endpoint_id=endpoint_id,
+            tsdb_kwargs=tsdb_kwargs,
+            from_date=from_date,
+            to_date=to_date,
+            x=x,
+            y_pred=y_pred,
+            y_true=y_true,
+            monitor_id=monitor_id,
+        )
 
     @property
     def x_ref_statistics(self) -> dict:
@@ -173,7 +213,7 @@ class DistributionDriftMonitor(Monitor, ABC):
                     )
                 self._weights = self.feature_importance
             else:
-                self._weights = self.load_dataset(url=self._weights)
+                self._weights = self._load_dataset(dataset=self._weights)
 
             if isinstance(self._weights, pd.DataFrame):
                 self._weights = self._weights.to_dict()
@@ -188,7 +228,7 @@ class DistributionDriftMonitor(Monitor, ABC):
 
     def calculate_statistics(
         self, dataset: pd.DataFrame
-    ) -> Dict[str, Dict[str, float]]:
+    ) -> pd.DataFrame:
         # Set up lists to hold the statistics calculations data frames and the metric names - columns:
         calculations: List[pd.DataFrame] = []
         columns: List[str] = []
@@ -202,14 +242,13 @@ class DistributionDriftMonitor(Monitor, ABC):
         result = pd.concat(objs=calculations, axis=1)
         result.columns = columns
 
-        # Return the dictionary representation of the results:
-        return result.T.to_dict()
+        return result
 
     def calculate_distribution_distances(
         self,
         dataset_histograms_1: Dict[str, Tuple[np.ndarray, int]],
         dataset_histograms_2: Dict[str, Tuple[np.ndarray, int]],
-    ) -> Dict[str, Dict[str, float]]:
+    ) -> pd.DataFrame:
         # Set up a list to hold the metrics calculations data frames:
         calculations = []
 
@@ -241,10 +280,12 @@ class DistributionDriftMonitor(Monitor, ABC):
         # Concatenate the results into a single data frame:
         calculations = pd.concat(objs=calculations, axis=1)
 
-        # Return the dictionary representation of the results:
         return calculations.T.to_dict()
 
     def calculate_drift_score(self):
+        # Calculate avg across all drift scores
+
+        # Calculate weighted drift scores
         pass
 
     def load(self):
@@ -282,8 +323,6 @@ class DataDistributionDriftMonitor(DistributionDriftMonitor):
         distribution_distances = self.calculate_distribution_distances(
             dataset_histograms_1=x_histogram, dataset_histograms_2=x_ref_histogram
         )
-        if self.weights:
-            distribution_distances = self.apply_weights(results=distribution_distances)
 
 
 class ConceptDistributionDriftMonitor(DistributionDriftMonitor):
