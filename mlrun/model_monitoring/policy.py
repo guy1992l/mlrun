@@ -71,15 +71,6 @@ class MonitorPolicy(ModelObj):
         y_columns_names: List[str] = None,
         y_pred_suffix: str = None,
         y_true_suffix: str = None,
-        # Online mode:
-        endpoint_id: str = None,
-        tsdb_kwargs: Dict[str, str] = None,
-        from_date: str = None,
-        to_date: str = None,
-        # Offline mode:
-        x: Union[pd.DataFrame, str] = None,
-        y_pred: Union[pd.DataFrame, str] = None,
-        y_true: Union[pd.DataFrame, str] = None,
         monitor_id: str = None,
     ):
         pass
