@@ -161,6 +161,8 @@ class DistributionDriftMonitor(Monitor, ABC):
 
         self._x_ref_statistics = None
         self._y_ref_statistics = None
+        self._x_ref_histograms = None
+        self._y_ref_histograms = None
 
         super().__init__(
             context=context,
@@ -192,8 +194,28 @@ class DistributionDriftMonitor(Monitor, ABC):
         return self._y_ref_statistics
 
     @property
+    def x_ref_histograms(self) -> dict:
+        return self._x_ref_histograms
+
+    @property
+    def y_ref_histograms(self) -> dict:
+        return self._y_ref_histograms
+
+    @property
     def weights(self) -> Dict[str, float]:
         return self._weights
+
+    def load_x_ref_statistics(self):
+        pass
+
+    def load_y_ref_statistics(self):
+        pass
+
+    def load_x_ref_histograms(self):
+        pass
+
+    def load_y_ref_histograms(self):
+        pass
 
     def load_weights(self):
         if self._weights is None:
@@ -226,9 +248,7 @@ class DistributionDriftMonitor(Monitor, ABC):
             for column in dataset.columns
         }
 
-    def calculate_statistics(
-        self, dataset: pd.DataFrame
-    ) -> pd.DataFrame:
+    def calculate_statistics(self, dataset: pd.DataFrame) -> pd.DataFrame:
         # Set up lists to hold the statistics calculations data frames and the metric names - columns:
         calculations: List[pd.DataFrame] = []
         columns: List[str] = []
@@ -239,10 +259,10 @@ class DistributionDriftMonitor(Monitor, ABC):
             columns.append(metric_name)
 
         # Concatenate the results into a single data frame:
-        result = pd.concat(objs=calculations, axis=1)
-        result.columns = columns
+        calculations = pd.concat(objs=calculations, axis=1)
+        calculations.columns = columns
 
-        return result
+        return calculations
 
     def calculate_distribution_distances(
         self,
@@ -265,7 +285,7 @@ class DistributionDriftMonitor(Monitor, ABC):
                     metric_function(
                         dataset_histograms_1[column][0],
                         dataset_histograms_2[column][0],
-                        **metric_kwargs
+                        **metric_kwargs,
                     )
                 )
             # Collect the scores of the metric as a data frame:
@@ -280,13 +300,30 @@ class DistributionDriftMonitor(Monitor, ABC):
         # Concatenate the results into a single data frame:
         calculations = pd.concat(objs=calculations, axis=1)
 
-        return calculations.T.to_dict()
+        return calculations
 
-    def calculate_drift_score(self):
-        # Calculate avg across all drift scores
+    def calculate_drift_score(
+        self, distribution_distances: pd.DataFrame
+    ) -> Dict[str, float]:
+        # Check if weights were provided:
+        if self.weights is None:
+            # Calculate avg across all features per metric:
+            scores = (
+                distribution_distances.sum() / len(distribution_distances.columns)
+            )
+        else:
+            # Calculate weighted drift scores:
+            weights = pd.DataFrame(
+                data=self.weights.values(),
+                index=self.weights.keys(),
+                columns=["weight"],
+            )
+            scores = distribution_distances.mul(
+                weights["weight"], axis=0
+            ).sum()
 
-        # Calculate weighted drift scores
-        pass
+        # Return the dictionary representation of the dataframe:
+        return scores.to_dict()
 
     def load(self):
         super().load()
@@ -324,6 +361,9 @@ class DataDistributionDriftMonitor(DistributionDriftMonitor):
             dataset_histograms_1=x_histogram, dataset_histograms_2=x_ref_histogram
         )
 
+        drift_scores = self.calculate_drift_score(distribution_distances=distribution_distances)
+        return drift_scores
+
 
 class ConceptDistributionDriftMonitor(DistributionDriftMonitor):
     """
@@ -340,4 +380,13 @@ class ConceptDistributionDriftMonitor(DistributionDriftMonitor):
             self.load_y_true()
 
     def run(self):
-        pass
+        y_ref_statistics = self.calculate_statistics(dataset=self.y_ref)
+
+        y_ref_histogram = self.calculate_dataset_histograms(dataset=self.y_ref)
+
+        distribution_distances = self.calculate_distribution_distances(
+            dataset_histograms_1=x_histogram, dataset_histograms_2=y_ref_histogram
+        )
+
+        drift_scores = self.calculate_drift_score(distribution_distances=distribution_distances)
+        return drift_scores
