@@ -9,22 +9,16 @@ import numpy as np
 import pandas as pd
 
 import mlrun
-from mlrun.feature_store import FeatureSet, FeatureVector
+import mlrun.feature_store as mlrun_fs
 from mlrun.model import ModelObj
 from mlrun.artifacts import Artifact, ModelArtifact
 from mlrun.datastore import is_store_uri, store_manager
 
 
 ModelType = object
-MLRunObjectType = Union[Artifact, ModelArtifact, FeatureSet, FeatureVector]
-
-
-def load_model(path_or_uri: str) -> ModelType:
-    pass
-
-
-def load_dataset(path_or_uri: str) -> pd.DataFrame:
-    pass
+MLRunObjectType = Union[
+    Artifact, ModelArtifact, mlrun_fs.FeatureSet, mlrun_fs.FeatureVector
+]
 
 
 # TODO: Temporary for the tsdb kwargs.
@@ -63,56 +57,52 @@ class MonitorSpec(ModelObj):
 # TODO: Mention in doc string that:
 #       * x_ref and y_ref are the reference data (aka baseline data)
 #       * y_true is the ground truth (aka actual values)
+#       * y are the model outputs, aka y_pred (aka predictions)
 #       * Possible overriding: __init__, validate, load ,run
 class Monitor(ABC):
-
-    DEFAULT_Y_PRED_SUFFIX = "_pred"
-    DEFAULT_Y_TRUE_SUFFIX = "_true"
 
     def __init__(
         self,
         context: mlrun.MLClientCtx,
+        endpoint_id: str,
         monitor_type: Union[MonitorType, str],
         is_realtime_serving: bool,
         model: str = None,
         x_ref: Union[pd.DataFrame, str] = None,
         y_ref: Union[pd.DataFrame, str] = None,
         y_columns_names: List[str] = None,
-        y_pred_suffix: str = DEFAULT_Y_PRED_SUFFIX,
-        y_true_suffix: str = DEFAULT_Y_TRUE_SUFFIX,
+        index: str = "index",
         selected_columns: List[str] = None,
         # Online mode:
-        endpoint_id: str = None,
         tsdb_kwargs: Dict[str, str] = None,
         from_date: str = None,
         to_date: str = None,
         # Offline mode:
         x: Union[pd.DataFrame, str] = None,
-        y_pred: Union[pd.DataFrame, str] = None,
+        y: Union[pd.DataFrame, str] = None,
         y_true: Union[pd.DataFrame, str] = None,
         monitor_id: str = None,
     ):
         # Store given common properties:
         self._context = context
+        self._endpoint_id = endpoint_id
         self._monitor_type = MonitorType(monitor_type)
         self._is_realtime_serving = is_realtime_serving
         self._model = model
         self._x_ref = x_ref
         self._y_ref = y_ref
         self._y_columns_names = y_columns_names
-        self._y_pred_suffix = y_pred_suffix
-        self._y_true_suffix = y_true_suffix
+        self._index = index
         self._selected_columns = selected_columns
 
         # Store online mode properties:
-        self._endpoint_id = endpoint_id
         self._tsdb_kwargs = tsdb_kwargs
         self._from_date = from_date
         self._to_date = to_date
 
         # Store offline mode properties:
         self._x = x
-        self._y_pred = y_pred
+        self._y = y
         self._y_true = y_true
         self._monitor_id = monitor_id
 
@@ -131,8 +121,8 @@ class Monitor(ABC):
         else:  # Offline mode
             self._init_offline_mode()
 
-        # Get the MLRun objects:
-        self._get_mlrun_objects()
+        # Initialize the mlrun objects and inputs from context:
+        self._init_from_mlrun()
 
     @property
     def is_realtime_serving(self) -> bool:
@@ -155,8 +145,8 @@ class Monitor(ABC):
         return self._x
 
     @property
-    def y_pred(self) -> pd.DataFrame:
-        return self._y_pred
+    def y(self) -> pd.DataFrame:
+        return self._y
 
     @property
     def y_true(self) -> pd.DataFrame:
@@ -171,16 +161,16 @@ class Monitor(ABC):
         return self._y_columns_names
 
     @property
-    def y_pred_suffix(self) -> str:
-        return self._y_pred_suffix
-
-    @property
-    def y_true_suffix(self) -> str:
-        return self._y_true_suffix
+    def index(self) -> str:
+        return self._index
 
     @property
     def selected_columns(self) -> List[str]:
         return self._selected_columns
+
+    @property
+    def context(self):
+        return self._context
 
     def get_mlrun_object(self, key: str) -> Union[MLRunObjectType, None]:
         return self._mlrun_objects.get(key, None)
@@ -280,103 +270,59 @@ class Monitor(ABC):
         # Load the dataset:
         self._x = self._load_dataset(dataset=self._x)
 
-        # Look for y columns to split them into `y_pred` and `y_true` if they were not provided. If they were, ignore
-        # all y columns:
+        # Look for y columns to split it to `y_ref` if it was not provided. If it was, ignore all y columns:
         if self.y_columns_names is not None:
-            # Look for the y pred columns:
-            y_pred_columns = set(
-                [f"{name}{self.y_pred_suffix}" for name in self.y_columns_names]
-            ) & set(self._x.columns)
-            if len(y_pred_columns) != 0:
+            # Look for the y columns:
+            y_columns = set(self.y_columns_names) & set(self._x.columns)
+            if len(y_columns) != 0:
                 # Update `y_pred` in case it was not provided:
-                if self.y_pred is None:
-                    self._y_pred = self._x[y_pred_columns]
-                    self._y_pred.rename(
-                        columns={
-                            name: re.sub(f"{self.y_pred_suffix}$", "", name)
-                            for name in self._y_pred.columns
-                        },
-                        inplace=True,
-                    )
-                    self.load_y_pred()
+                if self.y is None:
+                    self._y = self._x[y_columns]
+                    self.load_y()
                 # Remove the y pred columns from the x dataset:
-                self._x.drop(columns=y_pred_columns, inplace=True)
-
-            # Look for the y true columns:
-            y_true_columns = set(
-                [f"{name}{self.y_true_suffix}" for name in self.y_columns_names]
-            ) & set(self._x.columns)
-            if len(y_true_columns) != 0:
-                # Update `y_true` in case it was not provided:
-                if self.y_true is None:
-                    self._y_true = self._x[y_true_columns]
-                    self._y_true.rename(
-                        columns={
-                            name: re.sub(f"{self.y_true_suffix}$", "", name)
-                            for name in self._y_true.columns
-                        },
-                        inplace=True,
-                    )
-                    self.load_y_true()
-                # Remove the y true columns from the x dataset:
-                self._x.drop(columns=y_true_columns, inplace=True)
+                self._x.drop(columns=y_columns, inplace=True)
 
         # Clear the non-selected columns by the user:
         if self.selected_columns is not None:
             # Leave only selected columns:
             self._x = self._x[set(self.selected_columns) & set(self._x.columns)]
 
-    def load_y_pred(self):
+    def load_y(self):
         # Make sure `y_ref` is available for loading:
-        if self._y_pred is None:
+        if self._y is None:
             # `y_pred` was not provided, try to get it from the `x` dataset:
             self._context.logger.info(
                 "`y_pred` was not provided, looking for `y_pred` in `x`"
             )
             self.load_x()
-            if self._y_pred is None:
+            if self._y is None:
                 raise mlrun.errors.MLRunRuntimeError(
                     f"Cannot load `y_pred`.\n"
                     f"\n"
                     f"`y_pred` can be provided in the following ways:\n"
                     f"* Via the `y_pred` attribute to the class initializer.\n"
                     f"* Via the `x` attribute to the class initializer. The columns for `y_pred` will be taken "
-                    f"from the `y_columns_names` attribute with the `y_pred_suffix` suffix. `y_columns_names` can be "
-                    f"also read from the model artifact if it was logged with it. The available `y_columns_names` "
-                    f"now are: {self.y_columns_names}"
+                    f"from the `y_columns_names` attribute. `y_columns_names` can be also read from the model artifact "
+                    f"if it was logged with it. The available `y_columns_names` now are: {self.y_columns_names}"
                 )
             return
 
         # Load the dataset:
-        self._y_pred = self._load_dataset(dataset=self._y_pred)
+        self._y = self._load_dataset(dataset=self._y)
 
         # Clear the non-selected columns by the user:
         if self.selected_columns is not None:
             # Leave only selected columns:
-            self._y_pred = self._y_pred[
+            self._y = self._y[
                 set(self.selected_columns) & set(self._y_ref.columns)
             ]
 
     def load_y_true(self):
         # Make sure `y_ref` is available for loading:
         if self._y_true is None:
-            # `y_true` was not provided, try to get it from the `x` dataset:
-            self._context.logger.info(
-                "`y_true` was not provided, looking for `y_true` in `x`"
+            raise mlrun.errors.MLRunRuntimeError(
+                f"Cannot load `y_true`. `y_true was not provided."
             )
-            self.load_x()
-            if self._y_pred is None:
-                raise mlrun.errors.MLRunRuntimeError(
-                    f"Cannot load `y_true`.\n"
-                    f"\n"
-                    f"`y_true` can be provided in the following ways:\n"
-                    f"* Via the `y_true` attribute to the class initializer.\n"
-                    f"* Via the `x` attribute to the class initializer. The columns for `y_true` will be taken "
-                    f"from the `y_columns_names` attribute with the `y_true_suffix` suffix. `y_columns_names` can be "
-                    f"also read from the model artifact if it was logged with it. The available `y_columns_names` "
-                    f"now are: {self.y_columns_names}"
-                )
-            return
 
         # Load the dataset:
         self._y_true = self._load_dataset(dataset=self._y_true)
@@ -445,7 +391,17 @@ class Monitor(ABC):
         """
         pass
 
-    def _get_mlrun_objects(self):
+    def _init_from_mlrun(self):
+        # Store all context parameters (for extra parameters the user may pass):
+        for parameter_name, parameter_value in {
+            **self._context.inputs,
+            **self._context.parameters,
+        }.items():
+            if hasattr(self, parameter_name):
+                continue
+            setattr(self, parameter_name, parameter_value)
+
+        # Get the MLRun object of all the stored properties (if they are a store path):
         for attribute_name, attribute in self.__dict__.items():
             if isinstance(attribute, str) and is_store_uri(attribute):
                 self.load_mlrun_object(url=attribute, key=attribute_name.lstrip("_"))
@@ -473,7 +429,14 @@ class Monitor(ABC):
             ]
 
     @staticmethod
-    def _load_dataset(dataset: Union[str, mlrun.DataItem, pd.DataFrame]) -> pd.DataFrame:
+    def _load_dataset(
+        dataset: Union[str, mlrun.DataItem, mlrun_fs.FeatureVector, pd.DataFrame]
+    ) -> pd.DataFrame:
+        if isinstance(dataset, mlrun_fs.FeatureVector):
+            dataset = mlrun_fs.get_offline_features(
+                feature_vector=dataset, with_indexes=True
+            )
+
         # If it's a loaded dataframe, simply return:
         if isinstance(dataset, pd.DataFrame):
             return dataset
@@ -490,6 +453,7 @@ class Monitor(ABC):
         cls,
         context: mlrun.MLClientCtx,
         policy: Union[dict, str],
+        **kwargs
     ):
         # Initialize the monitor class from policy:
         monitor = cls.from_policy(context=context, policy=policy)

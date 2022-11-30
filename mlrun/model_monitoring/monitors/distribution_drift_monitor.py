@@ -118,8 +118,7 @@ class DistributionDriftMonitor(Monitor, ABC):
         x_ref: Union[pd.DataFrame, str] = None,
         y_ref: Union[pd.DataFrame, str] = None,
         y_columns_names: List[str] = None,
-        y_pred_suffix: str = Monitor.DEFAULT_Y_PRED_SUFFIX,
-        y_true_suffix: str = Monitor.DEFAULT_Y_TRUE_SUFFIX,
+        index: str = "index",
         selected_columns: List[str] = None,
         # Online mode:
         endpoint_id: str = None,
@@ -128,7 +127,7 @@ class DistributionDriftMonitor(Monitor, ABC):
         to_date: str = None,
         # Offline mode:
         x: Union[pd.DataFrame, str] = None,
-        y_pred: Union[pd.DataFrame, str] = None,
+        y: Union[pd.DataFrame, str] = None,
         y_true: Union[pd.DataFrame, str] = None,
         monitor_id: str = None,
         statistic_metrics: List[
@@ -172,15 +171,14 @@ class DistributionDriftMonitor(Monitor, ABC):
             x_ref=x_ref,
             y_ref=y_ref,
             y_columns_names=y_columns_names,
-            y_pred_suffix=y_pred_suffix,
-            y_true_suffix=y_true_suffix,
+            index=index,
             selected_columns=selected_columns,
             endpoint_id=endpoint_id,
             tsdb_kwargs=tsdb_kwargs,
             from_date=from_date,
             to_date=to_date,
             x=x,
-            y_pred=y_pred,
+            y=y,
             y_true=y_true,
             monitor_id=monitor_id,
         )
@@ -240,7 +238,7 @@ class DistributionDriftMonitor(Monitor, ABC):
             if isinstance(self._weights, pd.DataFrame):
                 self._weights = self._weights.to_dict()
 
-    def calculate_dataset_histograms(
+    def calculate_histograms(
         self, dataset: pd.DataFrame
     ) -> Dict[str, Tuple[np.ndarray, int]]:
         return {
@@ -351,11 +349,11 @@ class DataDistributionDriftMonitor(DistributionDriftMonitor):
         self.load_x()
 
     def run(self):
-        x_statistics = self.calculate_statistics(dataset=self.x)
         x_ref_statistics = self.calculate_statistics(dataset=self.x_ref)
+        x_ref_histogram = self.calculate_histograms(dataset=self.x_ref)
 
-        x_histogram = self.calculate_dataset_histograms(dataset=self.x)
-        x_ref_histogram = self.calculate_dataset_histograms(dataset=self.x_ref)
+        x_statistics = self.calculate_statistics(dataset=self.x)
+        x_histogram = self.calculate_histograms(dataset=self.x)
 
         distribution_distances = self.calculate_distribution_distances(
             dataset_histograms_1=x_histogram, dataset_histograms_2=x_ref_histogram
@@ -374,19 +372,22 @@ class ConceptDistributionDriftMonitor(DistributionDriftMonitor):
     def load(self):
         super().load()
         self.load_y_ref()
-        if self.y_pred is not None:
-            self.load_y_pred()
+        if self.y is not None:
+            self.load_y()
         if self.y_true is not None:
             self.load_y_true()
 
     def run(self):
         y_ref_statistics = self.calculate_statistics(dataset=self.y_ref)
+        y_ref_histogram = self.calculate_histograms(dataset=self.y_ref)
 
-        y_ref_histogram = self.calculate_dataset_histograms(dataset=self.y_ref)
+        if self.y:
+            y_histogram = self.calculate_histograms(dataset=self.y)
+            y_statistics = self.calculate_statistics(dataset=self.y)
 
-        distribution_distances = self.calculate_distribution_distances(
-            dataset_histograms_1=x_histogram, dataset_histograms_2=y_ref_histogram
-        )
+            y_distribution_distances = self.calculate_distribution_distances(
+                dataset_histograms_1=y_histogram, dataset_histograms_2=y_ref_histogram
+            )
 
-        drift_scores = self.calculate_drift_score(distribution_distances=distribution_distances)
+            drift_scores = self.calculate_drift_score(distribution_distances=y_distribution_distances)
         return drift_scores
