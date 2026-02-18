@@ -1,7 +1,7 @@
 (custom-packagers-tutorials)=
 # Creating custom packagers
 
-MLRun's {ref}`built-in packagers <packagers>` cover common Python types — scalars,
+MLRun's {ref}`built-in packagers <packagers-overview>` cover common Python types — scalars,
 collections, NumPy arrays, and Pandas DataFrames. But when your function produces or
 consumes a type that isn't built-in, the default behavior is to **pickle** the object
 with `cloudpickle` (or any configured pickling module of your choice). Pickle files are opaque, 
@@ -14,16 +14,24 @@ tables) instead of pickle blobs.
 **Reminder**: Packing applies to function **outputs** (return values → artifacts) and unpacking applies to 
 function **inputs** (artifacts → typed Python objects).
 
+**In this section**
+- [When to write a custom packager](#when-to-write-a-custom-packager)
+- [Choosing a base class: `DefaultPackager` vs `Packager`](#choosing-a-base-class-defaultpackager-vs-packager)
+- [The four patterns](#the-four-patterns)
+- [Step-by-step guide](#step-by-step-guide)
+- [Tutorials](#tutorials)
+
+
 ## When to write a custom packager
 
 Write a custom packager when:
 
 - **Your type isn't handled by a built-in packager** — for example, a PIL Image,
-  a LangChain prompt template, or a domain-specific data class.
+  a LangChain prompt template, or a domain-specific data class
 - **You want human-readable serialization** — save as JSON, PNG, CSV, etc.
-  instead of an opaque pickle file.
+  instead of an opaque pickle file
 - **You need bundling support** — your type is a collection that should be
-  decomposed into individual artifacts when unbundled with `"*key"`.
+  decomposed into individual artifacts when unbundled with `"*key"`
 
 ## Choosing a base class: `DefaultPackager` vs `Packager`
 
@@ -94,7 +102,7 @@ class MyTypePackager(DefaultPackager): ...
 
 ### 2. Set class variables
 
-At the minimum, set the type your packager handles and the default artifact type:
+At a minimum, set the type your packager handles and the default artifact type:
 
 ```python
 class MyTypePackager(DefaultPackager):
@@ -195,10 +203,10 @@ the artifact type is automatically excluded from unpacking validation, so no ext
 configuration is needed. Real-world examples:
 
 - **Pack-only**: PIL Image → PNG (no need to reconstruct the original PIL object
-  from the logged PNG).
+  from the logged PNG)
 - **Unpack-only**: reading a legacy serialization format that should no longer be
   written (e.g. `unpack_v1` for backward compatibility while new outputs use
-  `pack_v2`).
+  `pack_v2`)
 
 ### 5. Clean up temporary files
 
@@ -233,8 +241,8 @@ project.add_custom_packager(packager="my_module.MyTypePackager", is_mandatory=Tr
 The `is_mandatory` flag controls what happens when the packager fails to import on a
 remote worker:
 
-- `True` — the run fails immediately with an import error.
-- `False` — the packager is silently skipped and the fallback pickle behavior is used.
+- `True` — the run fails immediately with an import error
+- `False` — the packager is silently skipped and the fallback pickle behavior is used
 
 To remove a registered packager:
 
@@ -255,10 +263,10 @@ are several ways to achieve this:
   ```
 
 * **Build into the function image** — include the packager source in the function's
-  build so it is baked into the container image.
+  build so it is baked into the container image
 
 * **Shared storage** — place the packager module on a shared volume and configure the
-  function's working directory to point there.
+  function's working directory to point there
 
 If the packager module is missing at runtime, the run fails immediately when
 `is_mandatory=True`, or falls back to pickle when `is_mandatory=False`.
